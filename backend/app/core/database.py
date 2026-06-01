@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -28,9 +28,22 @@ def check_database() -> str:
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
-        return "configured"
+        return "available"
     except SQLAlchemyError:
         return "unavailable"
 
 
-# TODO(Task 2): Add concrete SQLAlchemy models and Alembic migrations.
+def get_table_counts() -> dict[str, int]:
+    from app.models import ActivityCategory, Member
+
+    try:
+        with SessionLocal() as db:
+            return {
+                "members": db.scalar(select(func.count(Member.id))) or 0,
+                "activity_categories": db.scalar(
+                    select(func.count(ActivityCategory.id))
+                )
+                or 0,
+            }
+    except SQLAlchemyError:
+        return {}

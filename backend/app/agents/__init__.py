@@ -1,2 +1,2 @@
-# TODO: Agent implementations are intentionally out of scope for Task 1.
+# Agent implementations for ClubAgent AI pipeline.
 

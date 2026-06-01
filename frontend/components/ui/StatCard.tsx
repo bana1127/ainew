@@ -1,12 +1,13 @@
 import type { LucideIcon } from "lucide-react";
 
-type Tone = "success" | "warning" | "danger" | "neutral";
+type Tone = "success" | "warning" | "danger" | "neutral" | "primary";
 
-const toneStyles: Record<Tone, string> = {
-  success: "border-pine/30 bg-pine/10 text-pine",
-  warning: "border-amber/30 bg-amber/10 text-amber",
-  danger: "border-coral/30 bg-coral/10 text-coral",
-  neutral: "border-line bg-white text-ink",
+const toneIconStyles: Record<Tone, React.CSSProperties> = {
+  success: { background: "var(--success-soft)", color: "var(--success)" },
+  warning: { background: "var(--warning-soft)", color: "var(--warning)" },
+  danger: { background: "var(--danger-soft)", color: "var(--danger)" },
+  neutral: { background: "var(--border-soft)", color: "var(--text-muted)" },
+  primary: { background: "var(--primary-soft)", color: "var(--primary)" },
 };
 
 export function StatCard({
@@ -21,17 +22,25 @@ export function StatCard({
   tone?: Tone;
 }) {
   return (
-    <div className="rounded-lg border border-line bg-white p-5 shadow-sm">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium text-gray-500">{label}</p>
-          <p className="mt-2 text-2xl font-semibold text-ink">{value}</p>
+    <div className="rounded-2xl p-5 transition-shadow hover:shadow-card-hover"
+      style={{
+        background: "var(--surface)",
+        border: "1px solid var(--border-soft)",
+        boxShadow: "0 1px 4px 0 rgba(31,31,36,0.05)",
+      }}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-medium truncate" style={{ color: "var(--text-muted)" }}>
+            {label}
+          </p>
+          <p className="mt-2 text-2xl font-semibold tracking-tight" style={{ color: "var(--text-main)" }}>
+            {value}
+          </p>
         </div>
-        <div className={`rounded-md border p-3 ${toneStyles[tone]}`}>
-          <Icon className="h-5 w-5" aria-hidden="true" />
+        <div className="rounded-xl p-2.5 shrink-0" style={toneIconStyles[tone]}>
+          <Icon className="h-4 w-4" aria-hidden="true" />
         </div>
       </div>
     </div>
   );
 }
-

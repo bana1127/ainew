@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     )
     UPLOAD_DIR: Path = BASE_DIR / "uploads"
     BACKEND_CORS_ORIGINS: str = "http://localhost:3000"
+    OPENAI_API_KEY: str | None = None
+    OPENAI_MODEL: str = "gpt-4.1-mini"
+    OPENAI_MOCK_MODE: bool = True
+    OPENAI_VISION_MODEL: str = ""
+    AUTOMATION_API_TOKEN: str = ""
 
     @property
     def cors_origins(self) -> list[str]:

@@ -1,0 +1,28 @@
+[
+  {
+    "key": "membership_fee_amount",
+    "value": { "amount": 30000 },
+    "description": "기본 회비 금액"
+  },
+  {
+    "key": "default_payment_period",
+    "value": { "period": "2026-1" },
+    "description": "기본 납부 기간"
+  },
+  {
+    "key": "audit_warning_days",
+    "value": { "days": 14 },
+    "description": "감사 준비 알림 기준일"
+  },
+  {
+    "key": "receipt_check_enabled",
+    "value": { "enabled": true },
+    "description": "영수증 검토 기능 활성화 여부"
+  },
+  {
+    "key": "transaction_matching_threshold",
+    "value": { "score": 0.8 },
+    "description": "거래내역 부원명 매칭 기준 점수"
+  }
+]
+

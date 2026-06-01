@@ -1,0 +1,75 @@
+[
+  {
+    "name": "정기 모임 / 스터디",
+    "description": "정기 모임, 스터디, 세션 운영 기록",
+    "required_fields_json": {
+      "fields": ["date", "location", "participants", "topic", "summary"]
+    },
+    "report_template": "활동명:\n활동 일시:\n활동 장소:\n참석자:\n활동 목적:\n주요 내용:\n활동 결과:\n향후 계획:"
+  },
+  {
+    "name": "프로젝트 / 개발 활동",
+    "description": "프로젝트 기획, 개발, 회고 기록",
+    "required_fields_json": {
+      "fields": ["project_name", "date", "contributors", "milestone", "result"]
+    },
+    "report_template": "프로젝트명:\n활동 일시:\n참여자:\n개발 목표:\n진행 내용:\n결과물:\n다음 작업:"
+  },
+  {
+    "name": "행사 / 발표",
+    "description": "발표회, 세미나, 외부 행사 참여 기록",
+    "required_fields_json": {
+      "fields": ["event_name", "date", "location", "speakers", "audience"]
+    },
+    "report_template": "행사명:\n행사 일시:\n장소:\n발표자:\n참석자:\n주요 내용:\n성과:"
+  },
+  {
+    "name": "대회 / 공모전",
+    "description": "대회, 공모전 준비와 참가 기록",
+    "required_fields_json": {
+      "fields": ["competition_name", "team", "period", "submission", "result"]
+    },
+    "report_template": "대회명:\n팀명:\n준비 기간:\n참가자:\n제출 내용:\n결과:\n회고:"
+  },
+  {
+    "name": "신입 부원 모집 / OT",
+    "description": "신입 모집, 면접, 오리엔테이션 기록",
+    "required_fields_json": {
+      "fields": ["date", "location", "target", "participants", "outcome"]
+    },
+    "report_template": "활동명:\n일시:\n장소:\n대상:\n진행 내용:\n참여 인원:\n결과:"
+  },
+  {
+    "name": "운영 회의",
+    "description": "운영진 회의와 의사결정 기록",
+    "required_fields_json": {
+      "fields": ["date", "attendees", "agenda", "decisions", "actions"]
+    },
+    "report_template": "회의명:\n일시:\n참석자:\n안건:\n논의 내용:\n결정 사항:\n후속 조치:"
+  },
+  {
+    "name": "교류 행사",
+    "description": "타 동아리, 외부 기관과의 교류 기록",
+    "required_fields_json": {
+      "fields": ["partner", "date", "location", "participants", "summary"]
+    },
+    "report_template": "행사명:\n교류 대상:\n일시:\n장소:\n참석자:\n주요 내용:\n성과:"
+  },
+  {
+    "name": "MT / 회식 / 친목",
+    "description": "친목 활동과 공동체 활동 기록",
+    "required_fields_json": {
+      "fields": ["date", "location", "participants", "cost", "summary"]
+    },
+    "report_template": "활동명:\n일시:\n장소:\n참석자:\n활동 내용:\n지출 요약:\n비고:"
+  },
+  {
+    "name": "물품 구매 / 행정 처리",
+    "description": "동아리 물품 구매, 행정 업무, 정산 기록",
+    "required_fields_json": {
+      "fields": ["date", "item", "amount", "manager", "reason"]
+    },
+    "report_template": "처리 항목:\n일시:\n담당자:\n구매/처리 내용:\n금액:\n사유:\n증빙:"
+  }
+]
+
