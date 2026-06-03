@@ -7,6 +7,7 @@ import {
   Activity,
   Bell,
   Bot,
+  ChartNoAxesCombined,
   CreditCard,
   FileText,
   LayoutDashboard,
@@ -23,37 +24,38 @@ const menuGroups: Array<{ label: string; items: MenuItem[] }> = [
   {
     label: "MAIN",
     items: [
-      { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+      { label: "대시보드", href: "/dashboard", icon: LayoutDashboard },
       { label: "AI 작업실", href: "/assistant", icon: Bot },
     ],
   },
   {
     label: "OPERATIONS",
     items: [
-      { label: "Activities", href: "/activities", icon: Activity },
-      { label: "Members", href: "/members", icon: Users },
+      { label: "활동 관리", href: "/activities", icon: Activity },
+      { label: "부원 관리", href: "/members", icon: Users },
     ],
   },
   {
     label: "FINANCE",
     items: [
-      { label: "Payments", href: "/payments", icon: CreditCard },
-      { label: "Receipts", href: "/receipts", icon: ReceiptText },
-      { label: "Transactions", href: "/transactions", icon: WalletCards },
+      { label: "예산 관리", href: "/budget", icon: ChartNoAxesCombined },
+      { label: "회비", href: "/payments", icon: CreditCard },
+      { label: "거래내역", href: "/transactions", icon: WalletCards },
+      { label: "영수증", href: "/receipts", icon: ReceiptText },
     ],
   },
   {
     label: "DOCUMENTS",
     items: [
-      { label: "Reports", href: "/reports", icon: PenLine },
-      { label: "References", href: "/references", icon: FileText },
+      { label: "보고서", href: "/reports", icon: PenLine },
+      { label: "자료실", href: "/references", icon: FileText },
     ],
   },
   {
     label: "SYSTEM",
     items: [
-      { label: "Notifications", href: "/notifications", icon: Bell },
-      { label: "Settings", href: "/settings", icon: Settings },
+      { label: "알림", href: "/notifications", icon: Bell },
+      { label: "설정", href: "/settings", icon: Settings },
     ],
   },
 ];

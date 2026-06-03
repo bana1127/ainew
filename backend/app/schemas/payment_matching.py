@@ -105,5 +105,8 @@ class PaymentSummaryResponse(ORMModel):
     unpaid_count: int
     need_check_count: int
     exempt_count: int = 0
+    overpaid_count: int = 0
+    missing_record_count: int = 0
+    receivable_amount: int = 0
     total_required_amount: int
     total_paid_amount: int

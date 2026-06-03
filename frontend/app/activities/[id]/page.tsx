@@ -58,9 +58,13 @@ import {
   uploadActivityFile,
   getFilePreview,
   softDeleteFile,
+  patchFileActivity,
   patchFileSubmission,
   getSubmissionPackagePreview,
   generateSubmissionPackage,
+  getActivityAuditChecklist,
+  type AuditCheckItem,
+  type ActivityAuditCheckResult,
   type DocumentTemplate,
   type DocumentPreviewResult,
   type GeneratedDocument,
@@ -91,6 +95,25 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "files", label: "파일함" },
   { key: "import", label: "명단" },
 ];
+
+function normalizeActivityTab(value: string | null | undefined): TabKey | null {
+  if (!value) return null;
+  const aliases: Record<string, TabKey> = {
+    "activity-fee": "fees",
+    activity_fee: "fees",
+    fees: "fees",
+    evidence: "receipts",
+    receipts: "receipts",
+    files: "files",
+    audit: "ai",
+    ai: "ai",
+    overview: "overview",
+    participants: "participants",
+    report: "report",
+    import: "import",
+  };
+  return aliases[value] ?? null;
+}
 
 function fmt(n: number): string {
   return n.toLocaleString("ko-KR");
@@ -358,6 +381,7 @@ function ParticipantsTab({
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [memberSearch, setMemberSearch] = useState("");
 
   useEffect(() => {
     if (showAdd) {
@@ -371,6 +395,17 @@ function ParticipantsTab({
       .filter((memberId): memberId is string => Boolean(memberId)),
   );
   const availableMembers = allMembers.filter((m) => !participantMemberIds.has(m.id));
+  const searchedMembers = memberSearch.trim()
+    ? availableMembers.filter((m) => {
+        const q = memberSearch.trim().toLowerCase();
+        return (
+          (m.name ?? "").toLowerCase().includes(q) ||
+          (m.student_id ?? "").toLowerCase().includes(q) ||
+          (m.department ?? "").toLowerCase().includes(q) ||
+          (m.role ?? "").toLowerCase().includes(q)
+        );
+      })
+    : availableMembers;
 
   async function handleAdd() {
     if (!selectedId) return;
@@ -524,36 +559,51 @@ function ParticipantsTab({
 
       {/* Add Participant Modal */}
       {showAdd && (
-        <Modal isOpen onClose={() => setShowAdd(false)} title="참여자 추가">
+        <Modal isOpen onClose={() => { setShowAdd(false); setMemberSearch(""); setSelectedId(""); }} title="참여자 추가">
           <div className="space-y-4">
+            <div className="rounded-xl px-3 py-2 text-xs" style={{ background: "var(--surface-soft)", color: "var(--text-muted)", border: "1px solid var(--border-soft)" }}>
+              전체 부원 {allMembers.length}명 · 현재 참여자 {participantMemberIds.size}명 · 추가 가능 {availableMembers.length}명
+            </div>
             {availableMembers.length === 0 ? (
               <p className="text-sm" style={{ color: "var(--text-muted)" }}>
                 추가할 수 있는 활동 중인 부원이 없습니다.
               </p>
             ) : (
-              <div>
-                <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>
-                  부원 선택
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  placeholder="이름 / 학번 / 학과 / 직위 검색"
+                  value={memberSearch}
+                  onChange={(e) => { setMemberSearch(e.target.value); setSelectedId(""); }}
+                  className="w-full rounded-xl px-3 py-2 text-sm focus:outline-none min-h-[44px]"
+                  style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)" }}
+                />
+                <label className="block text-xs font-medium" style={{ color: "var(--text-muted)" }}>
+                  부원 선택 {memberSearch.trim() ? `(검색 결과 ${searchedMembers.length}명)` : ""}
                 </label>
                 <select
                   className="w-full rounded-xl px-3 py-2 text-sm focus:outline-none min-h-[44px]"
                   style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)" }}
                   value={selectedId}
                   onChange={(e) => setSelectedId(e.target.value)}
+                  size={Math.min(searchedMembers.length + 1, 8)}
                 >
                   <option value="">-- 부원 선택 --</option>
-                  {availableMembers.map((m) => (
+                  {searchedMembers.map((m) => (
                     <option key={m.id} value={m.id}>
-                      {m.name} {m.student_id ? `(${m.student_id})` : ""}
+                      {m.name} {m.student_id ? `(${m.student_id})` : ""}{m.department ? ` · ${m.department}` : ""}
                     </option>
                   ))}
                 </select>
+                {memberSearch.trim() && searchedMembers.length === 0 && (
+                  <p className="text-xs" style={{ color: "var(--text-muted)" }}>검색 결과가 없습니다.</p>
+                )}
               </div>
             )}
             {actionError && <p className="text-sm" style={{ color: "var(--danger)" }}>{actionError}</p>}
             <div className="flex gap-2">
               <Button onClick={handleAdd} loading={adding} disabled={!selectedId}>추가</Button>
-              <Button variant="secondary" onClick={() => setShowAdd(false)}>취소</Button>
+              <Button variant="secondary" onClick={() => { setShowAdd(false); setMemberSearch(""); setSelectedId(""); }}>취소</Button>
             </div>
           </div>
         </Modal>
@@ -1272,6 +1322,23 @@ function ReceiptsTab({
         <div className="p-4"><ErrorState message={actionError} /></div>
       )}
 
+      {/* 증빙 요약 */}
+      {receipts.length > 0 && (
+        <div className="px-4 py-3 grid grid-cols-2 sm:grid-cols-4 gap-2" style={{ borderBottom: "1px solid var(--border-soft)" }}>
+          {[
+            { label: "전체", value: receipts.length, color: "var(--text-main)" },
+            { label: "분석 완료", value: receipts.filter(r => r.evidence_status !== "pending").length, color: "var(--success)" },
+            { label: "분석 대기", value: receipts.filter(r => r.evidence_status === "pending").length, color: "var(--warning)" },
+            { label: "확인 필요", value: receipts.filter(r => r.need_check).length, color: "var(--danger)" },
+          ].map(({ label, value, color }) => (
+            <div key={label} className="rounded-xl p-2.5 text-center" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>{label}</p>
+              <p className="text-sm font-semibold mt-0.5" style={{ color }}>{value}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
       {receipts.length === 0 ? (
         <EmptyState
           message="연결된 영수증이 없습니다."
@@ -1420,6 +1487,121 @@ const FILE_ROLE_LABEL: Record<string, string> = {
   submission: "제출",
   generated: "생성됨",
 };
+
+// ─── File Group definitions ───────────────────────────────────────────────────
+
+const FILE_GROUPS: Array<{ label: string; categories: string[]; roles: string[] }> = [
+  { label: "원본 파일", categories: ["bank_statement", "activity_plan", "google_form_application", "google_form_feedback"], roles: ["source"] },
+  { label: "증빙 파일", categories: ["receipt", "photo"], roles: ["evidence"] },
+  { label: "생성 문서", categories: ["activity_report", "submission_package"], roles: ["generated"] },
+  { label: "기타 파일", categories: ["attachment", "other"], roles: ["attachment", "submission", "report", "plan"] },
+];
+
+function _fileGroup(file: ActivityFile): string {
+  const cat = file.file_category ?? "";
+  const role = file.file_role ?? "";
+  for (const g of FILE_GROUPS) {
+    if (g.categories.includes(cat) || g.roles.includes(role)) return g.label;
+  }
+  return "기타 파일";
+}
+
+function FileGroupedList({
+  files,
+  previewFileId,
+  deletingId,
+  onPreview,
+  onDownload,
+  onToggleSubmission,
+  onUnlink,
+  onDelete,
+}: {
+  files: ActivityFile[];
+  previewFileId: string | null;
+  deletingId: string | null;
+  onPreview: (f: ActivityFile) => void;
+  onDownload: (f: ActivityFile) => void;
+  onToggleSubmission: (f: ActivityFile) => void;
+  onUnlink: (fileId: string) => void;
+  onDelete: (fileId: string) => void;
+}) {
+  const grouped = FILE_GROUPS.map((g) => ({
+    ...g,
+    files: files.filter((f) => _fileGroup(f) === g.label),
+  })).filter((g) => g.files.length > 0);
+
+  return (
+    <div>
+      {grouped.map((group) => (
+        <div key={group.label}>
+          <div className="px-4 py-2 text-xs font-semibold" style={{ background: "var(--surface-soft)", color: "var(--text-muted)", borderBottom: "1px solid var(--border-soft)" }}>
+            {group.label} ({group.files.length})
+          </div>
+          {group.files.map((f) => (
+            <div key={f.id} className="flex items-center gap-3 px-4 py-3"
+              style={{ borderBottom: "1px solid var(--border-soft)", transition: "background 0.1s" }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+              <div className="shrink-0 w-9 h-9 rounded-lg flex items-center justify-center text-xs font-bold uppercase"
+                style={{ background: "var(--primary-soft, rgba(99,102,241,0.1))", color: "var(--primary)" }}>
+                {(f.file_ext ?? "?").slice(0, 4)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate" style={{ color: "var(--text-main)" }}>{f.original_filename}</p>
+                <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                  {f.file_category && (
+                    <span className="text-xs rounded-full px-2 py-0.5" style={{ background: "var(--primary-soft)", color: "var(--primary)" }}>
+                      {FILE_CATEGORY_LABEL[f.file_category] ?? f.file_category}
+                    </span>
+                  )}
+                  {f.is_submission_file && (
+                    <span className="text-xs rounded-full px-2 py-0.5" style={{ background: "var(--success-soft)", color: "var(--success)" }}>
+                      제출용{f.submission_month ? ` ${f.submission_month}` : ""}
+                    </span>
+                  )}
+                  <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+                    {formatBytes(f.size_bytes)}{f.created_at && ` · ${new Date(f.created_at).toLocaleDateString("ko-KR")}`}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                {f.preview_available && (
+                  <button className="rounded-lg px-2.5 py-1.5 text-xs transition-all hover:opacity-75"
+                    style={{ background: "var(--surface-soft)", color: "var(--text-muted)", border: "1px solid var(--border-soft)" }}
+                    onClick={() => onPreview(f)}>
+                    {previewFileId === f.id ? "닫기" : "미리보기"}
+                  </button>
+                )}
+                <a href={f.download_url} download={f.original_filename}>
+                  <button className="p-1.5 rounded-lg transition-all hover:opacity-75" style={{ color: "var(--text-muted)" }} title="다운로드">
+                    <Download className="h-4 w-4" />
+                  </button>
+                </a>
+                <button className="p-1.5 rounded-lg transition-all hover:opacity-75"
+                  style={{ color: f.is_submission_file ? "var(--warning)" : "var(--text-muted)" }}
+                  title={f.is_submission_file ? "제출용 해제" : "제출용 지정"}
+                  onClick={() => onToggleSubmission(f)}>
+                  {f.is_submission_file ? "★" : "☆"}
+                </button>
+                <button className="rounded-lg px-2 py-1 text-xs transition-all hover:opacity-75"
+                  style={{ color: "var(--text-muted)", border: "1px solid var(--border-soft)", background: "transparent" }}
+                  title="연결 해제 (파일 보존)"
+                  disabled={deletingId === f.id}
+                  onClick={() => onUnlink(f.id)}>
+                  해제
+                </button>
+                <button className="p-1.5 rounded-lg transition-all hover:opacity-75" style={{ color: "var(--danger)" }}
+                  title="삭제" disabled={deletingId === f.id} onClick={() => onDelete(f.id)}>
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function formatBytes(bytes: number | null): string {
   if (!bytes) return "-";
@@ -1668,6 +1850,22 @@ function FileVaultTab({
     }
   }
 
+  async function handleUnlink(fileId: string) {
+    if (!confirm("이 파일을 활동에서 연결 해제하시겠습니까?\n파일은 삭제되지 않고 전역 파일함으로 이동합니다.")) return;
+    setDeletingId(fileId);
+    setActionError(null);
+    try {
+      await patchFileActivity(fileId, null);
+      setFiles((prev) => prev.filter((f) => f.id !== fileId));
+      if (previewFile?.id === fileId) setPreviewFile(null);
+      onUpdated();
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "연결 해제 실패");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   async function handleToggleSubmission(file: ActivityFile) {
     try {
       const updated = await patchFileSubmission(file.id, {
@@ -1832,82 +2030,16 @@ function FileVaultTab({
             <EmptyState message="파일이 없습니다." description="위에서 파일을 업로드하세요." />
           </div>
         ) : (
-          <div className="divide-y" style={{ borderTop: "none" }}>
-            {files.map((f) => (
-              <div key={f.id} className="flex items-center gap-3 px-4 py-3 group"
-                style={{ transition: "background 0.1s" }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
-                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-
-                {/* 파일 아이콘 */}
-                <div className="shrink-0 w-9 h-9 rounded-lg flex items-center justify-center text-xs font-bold uppercase"
-                  style={{ background: "var(--primary-soft, rgba(99,102,241,0.1))", color: "var(--primary)" }}>
-                  {(f.file_ext ?? "?").slice(0, 4)}
-                </div>
-
-                {/* 정보 */}
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate" style={{ color: "var(--text-main)" }}>
-                    {f.original_filename}
-                  </p>
-                  <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-                    {f.file_category && (
-                      <span className="text-xs rounded-full px-2 py-0.5"
-                        style={{ background: "var(--primary-soft)", color: "var(--primary)" }}>
-                        {FILE_CATEGORY_LABEL[f.file_category] ?? f.file_category}
-                      </span>
-                    )}
-                    {f.is_submission_file && (
-                      <span className="text-xs rounded-full px-2 py-0.5"
-                        style={{ background: "var(--success-soft)", color: "var(--success)" }}>
-                        제출용{f.submission_month ? ` ${f.submission_month}` : ""}
-                      </span>
-                    )}
-                    <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                      {formatBytes(f.size_bytes)}
-                      {f.created_at && ` · ${new Date(f.created_at).toLocaleDateString("ko-KR")}`}
-                    </span>
-                  </div>
-                </div>
-
-                {/* 액션 버튼 */}
-                <div className="flex items-center gap-1 shrink-0">
-                  {f.preview_available && (
-                    <button
-                      className="rounded-lg px-2.5 py-1.5 text-xs transition-all hover:opacity-75"
-                      style={{ background: "var(--surface-soft)", color: "var(--text-muted)", border: "1px solid var(--border-soft)" }}
-                      onClick={() => setPreviewFile(previewFile?.id === f.id ? null : f)}
-                    >
-                      {previewFile?.id === f.id ? "닫기" : "미리보기"}
-                    </button>
-                  )}
-                  <a href={f.download_url} download={f.original_filename}>
-                    <button className="p-1.5 rounded-lg transition-all hover:opacity-75"
-                      style={{ color: "var(--text-muted)" }} title="다운로드">
-                      <Download className="h-4 w-4" />
-                    </button>
-                  </a>
-                  <button
-                    className="p-1.5 rounded-lg transition-all hover:opacity-75"
-                    style={{ color: f.is_submission_file ? "var(--warning)" : "var(--text-muted)" }}
-                    title={f.is_submission_file ? "제출용 해제" : "제출용 지정"}
-                    onClick={() => handleToggleSubmission(f)}
-                  >
-                    {f.is_submission_file ? "★" : "☆"}
-                  </button>
-                  <button
-                    className="p-1.5 rounded-lg transition-all hover:opacity-75"
-                    style={{ color: "var(--danger)" }}
-                    title="삭제"
-                    disabled={deletingId === f.id}
-                    onClick={() => handleDelete(f.id)}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+          <FileGroupedList
+            files={files}
+            previewFileId={previewFile?.id ?? null}
+            deletingId={deletingId}
+            onPreview={(f) => setPreviewFile(previewFile?.id === f.id ? null : f)}
+            onDownload={() => {}}
+            onToggleSubmission={handleToggleSubmission}
+            onUnlink={handleUnlink}
+            onDelete={handleDelete}
+          />
         )}
       </Card>
 
@@ -2558,6 +2690,28 @@ export default function ActivityDetailPage() {
   }, [activityId]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const applyTab = (value: string | null | undefined) => {
+      const next = normalizeActivityTab(value);
+      if (next) setActiveTab(next);
+    };
+    applyTab(new URLSearchParams(window.location.search).get("tab"));
+
+    const handleSwitchTab = (event: Event) => {
+      applyTab((event as CustomEvent<string>).detail);
+    };
+    const handlePopState = () => {
+      applyTab(new URLSearchParams(window.location.search).get("tab"));
+    };
+
+    window.addEventListener("switch-tab", handleSwitchTab);
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("switch-tab", handleSwitchTab);
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, []);
 
   if (loading) {
     return <AppShell><LoadingState /></AppShell>;

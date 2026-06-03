@@ -14,6 +14,7 @@ const PAGE_META: Record<string, { title: string; description: string }> = {
   "/receipts": { title: "영수증 분석", description: "영수증을 업로드하고 AI로 증빙 적합성을 분석합니다." },
   "/transactions": { title: "거래내역", description: "거래내역서를 업로드하여 입출금 내역을 관리합니다." },
   "/payments": { title: "납부 현황", description: "회비 및 활동비 납부 현황을 확인하고 관리합니다." },
+  "/budget": { title: "예산 관리", description: "수입, 지출, 미납, 환불, 증빙과 활동별 정산을 한곳에서 확인합니다." },
   "/notifications": { title: "알림", description: "시스템 알림 및 자동 점검 결과를 조회합니다." },
   "/settings": { title: "설정", description: "활동 카테고리 및 OpenAI 설정을 관리합니다." },
 };

@@ -41,9 +41,9 @@ def list_receipts(
     if category:
         statement = statement.where(Receipt.category == category)
     if start_date:
-        statement = statement.where(Receipt.purchased_at >= dt_type.fromisoformat(start_date))
+        statement = statement.where(Receipt.receipt_date >= dt_type.fromisoformat(start_date).date())
     if end_date:
-        statement = statement.where(Receipt.purchased_at <= dt_type.fromisoformat(end_date))
+        statement = statement.where(Receipt.receipt_date <= dt_type.fromisoformat(end_date).date())
     if q:
         like = f"%{q}%"
         statement = statement.where(

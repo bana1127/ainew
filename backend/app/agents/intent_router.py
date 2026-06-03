@@ -88,6 +88,15 @@ MEMBERSHIP_FEE_GENERATE_KEYWORDS = {
     "이번 학기 회비 대상", "학기 회비 대상", "회비 대상자 생성",
     "회비 납부 대상자", "회비 생성해줘", "회비 대상 만들어",
 }
+# Activity audit check / evidence status check (Task 34)
+ACTIVITY_AUDIT_CHECK_KEYWORDS = {
+    "감사 준비 상태 확인해줘", "감사 준비 상태", "감사 체크리스트",
+    "감사 준비됐어", "제출 준비 상태", "활동 준비 상태",
+    "증빙 빠진 거 확인해줘", "증빙 확인해줘", "증빙 빠진 거",
+    "영수증 빠진 거", "증빙 상태 확인", "파일 누락 확인",
+    "감사 준비 완료됐어", "감사자료 준비 상태",
+}
+
 # Participant import into an existing activity (activity_id already linked)
 PARTICIPANT_IMPORT_KEYWORDS = {
     "참여자로 등록", "참가자로 등록", "참여자 등록해줘", "참가자 등록해줘",
@@ -168,6 +177,10 @@ def route(
     # 0. Participant import into an already-linked activity. This is narrower
     # than the activity-create file flow above so "명단 등록해줘" keeps creating
     # a new activity unless the orchestrator has an activity_id context.
+    # 0a. Activity audit check / evidence status (Task 34)
+    if _has_keyword(msg, ACTIVITY_AUDIT_CHECK_KEYWORDS):
+        return IntentResult("activity_audit_check", 0.93, "Activity audit check keywords")
+
     # 0b. Activity fee transaction matching
     if _has_keyword(msg, ACTIVITY_FEE_TRANSACTION_MATCH_KEYWORDS):
         return IntentResult("activity_fee_transaction_match", 0.93, "Activity fee transaction match keywords")

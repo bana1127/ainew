@@ -4,8 +4,9 @@ type StatusKey =
   | "active" | "inactive" | "graduated" | "paused"
   | "draft" | "generated" | "confirmed" | "archived"
   | "pending" | "valid" | "need_check" | "invalid"
-  | "unmatched" | "matched" | "excluded"
-  | "paid" | "partial" | "unpaid";
+  | "unmatched" | "matched" | "excluded" | "ignored" | "refund_matched"
+  | "paid" | "partial" | "unpaid" | "exempt" | "overpaid"
+  | "cancelled" | "refunded" | "refund_required" | "refund_pending";
 
 interface StatusConfig {
   label: string;
@@ -32,9 +33,17 @@ const STATUS_MAP: Record<StatusKey, StatusConfig> = {
   matched:   { label: "매칭됨",   style: { background: "var(--success-soft)", color: "var(--success)" } },
   excluded:  { label: "제외",     style: { background: "var(--border-soft)",  color: "var(--text-muted)" } },
 
-  paid:      { label: "납부 완료", style: { background: "var(--success-soft)", color: "var(--success)" } },
-  partial:   { label: "부분 납부", style: { background: "var(--warning-soft)", color: "var(--warning)" } },
-  unpaid:    { label: "미납",     style: { background: "var(--danger-soft)",  color: "var(--danger)" } },
+  paid:             { label: "납부 완료",  style: { background: "var(--success-soft)", color: "var(--success)" } },
+  partial:          { label: "부분 납부",  style: { background: "var(--warning-soft)", color: "var(--warning)" } },
+  unpaid:           { label: "미납",      style: { background: "var(--danger-soft)",  color: "var(--danger)" } },
+  exempt:           { label: "면제",      style: { background: "var(--border-soft)",  color: "var(--text-muted)" } },
+  overpaid:         { label: "초과 납부", style: { background: "var(--warning-soft)", color: "var(--warning)" } },
+  cancelled:        { label: "취소",      style: { background: "var(--border-soft)",  color: "var(--text-muted)" } },
+  refunded:         { label: "환불 완료", style: { background: "var(--success-soft)", color: "var(--success)" } },
+  refund_required:  { label: "환불 필요", style: { background: "var(--danger-soft)",  color: "var(--danger)" } },
+  refund_pending:   { label: "환불 대기", style: { background: "var(--warning-soft)", color: "var(--warning)" } },
+  ignored:          { label: "무시",      style: { background: "var(--border-soft)",  color: "var(--text-muted)" } },
+  refund_matched:   { label: "환불매칭",  style: { background: "var(--primary-soft)", color: "var(--primary)" } },
 };
 
 const DEFAULT_STYLE: React.CSSProperties = {
@@ -54,7 +63,7 @@ export function StatusBadge({ status, customLabel }: StatusBadgeProps) {
 
   return (
     <span
-      className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium"
+      className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium whitespace-nowrap"
       style={style}
     >
       {displayLabel}

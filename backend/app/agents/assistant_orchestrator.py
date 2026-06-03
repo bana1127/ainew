@@ -251,6 +251,8 @@ class AssistantOrchestrator:
                 resp = self._bulk_membership_fee_mark_paid(inp, intent_result)
             elif intent == "membership_fee_generate":
                 resp = self._membership_fee_generate(inp, intent_result)
+            elif intent == "activity_audit_check":
+                resp = self._activity_audit_check(inp, intent_result, activity_res)
             elif intent == "activity_fee_transaction_match":
                 resp = self._activity_fee_transaction_match(inp, intent_result, activity_res)
             else:
@@ -1779,6 +1781,107 @@ class AssistantOrchestrator:
             apply_payload={"action_id": preview.action_id},
             detail_url=f"/activities/{activity_res.activity_id}",
             activity_context=_build_activity_context_dict(activity_res),
+        )
+
+    # ------------------------------------------------------------------
+    # activity_audit_check (Task 34)
+    # ------------------------------------------------------------------
+
+    def _activity_audit_check(
+        self,
+        inp: AssistantInput,
+        ir: IntentResult,
+        activity_res: ActivityResolutionResult,
+    ) -> AssistantExecuteResponse:
+        """Handle '감사 준비 상태 확인해줘' / '증빙 빠진 거 확인해줘'.
+
+        Requires activity context. Returns audit checklist without DB changes.
+        """
+        from app.services.activity_audit_check_service import compute_audit_checklist
+
+        if activity_res.mode != "linked" or not activity_res.activity_id:
+            return AssistantExecuteResponse(
+                intent="activity_audit_check",
+                confidence=ir.confidence,
+                agent_flow=["Activity Resolver", "AuditCheckService"],
+                result_type="general_message",
+                result={},
+                requires_confirmation=False,
+                message="감사 준비 상태를 확인하려면 활동 상세 페이지의 AI 탭에서 실행하거나, 어떤 활동인지 알려주세요.",
+                activity_context=_build_activity_context_dict(activity_res),
+                activity_candidates=_build_candidates_list(activity_res),
+                detail_url="/activities",
+            )
+
+        try:
+            activity_uuid = UUID(activity_res.activity_id)
+        except (ValueError, AttributeError):
+            return AssistantExecuteResponse(
+                intent="activity_audit_check",
+                confidence=ir.confidence,
+                agent_flow=["Activity Resolver"],
+                result_type="error",
+                result={"error": "Invalid activity_id"},
+                requires_confirmation=False,
+                message="활동 ID가 올바르지 않습니다.",
+                detail_url="/activities",
+            )
+
+        try:
+            result = compute_audit_checklist(db=self.db, activity_id=activity_uuid)
+        except Exception as exc:
+            logger.exception("activity_audit_check error: %s", exc)
+            return AssistantExecuteResponse(
+                intent="activity_audit_check",
+                confidence=ir.confidence,
+                agent_flow=["Activity Resolver", "AuditCheckService"],
+                result_type="error",
+                result={"error": str(exc)},
+                requires_confirmation=False,
+                message=f"감사 체크리스트 계산 중 오류: {exc}",
+                detail_url=f"/activities/{activity_res.activity_id}",
+            )
+
+        done_items = [item for item in result.items if item.done]
+        not_done_items = [item for item in result.items if not item.done]
+        warnings = [item for item in result.items if item.warning]
+
+        if result.ready_for_audit:
+            summary_msg = f"'{result.activity_title}' 활동이 감사 준비 완료됐습니다. ({result.total_done}/{result.total_items})"
+        else:
+            missing_labels = [item.label for item in not_done_items]
+            summary_msg = (
+                f"'{result.activity_title}' 활동의 감사 준비 상태: {result.total_done}/{result.total_items} 완료. "
+                f"미완료 항목: {', '.join(missing_labels)}"
+            )
+
+        return AssistantExecuteResponse(
+            intent="activity_audit_check",
+            confidence=ir.confidence,
+            agent_flow=["Activity Resolver", "AuditCheckService"],
+            result_type="activity_audit_check_result",
+            result={
+                "activity_id": result.activity_id,
+                "activity_title": result.activity_title,
+                "total_done": result.total_done,
+                "total_items": result.total_items,
+                "ready_for_audit": result.ready_for_audit,
+                "items": [
+                    {
+                        "key": item.key,
+                        "label": item.label,
+                        "done": item.done,
+                        "detail": item.detail,
+                        "count": item.count,
+                        "warning": item.warning,
+                    }
+                    for item in result.items
+                ],
+            },
+            requires_confirmation=False,
+            message=summary_msg,
+            activity_context=_build_activity_context_dict(activity_res),
+            detail_url=f"/activities/{activity_res.activity_id}",
         )
 
     # ------------------------------------------------------------------

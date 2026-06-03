@@ -509,7 +509,7 @@ export default function MembersPage() {
               }
             />
           ) : (
-            <div className="overflow-x-auto">
+            <div className="hidden md:block overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
                   <tr style={{ background: "var(--surface-soft)", borderBottom: "1px solid var(--border-soft)" }}>
@@ -544,13 +544,13 @@ export default function MembersPage() {
                       <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
                         {m.student_id ?? "-"}
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
+                      <td className="px-4 py-3 text-xs max-w-[120px] truncate" title={m.department ?? "-"} style={{ color: "var(--text-muted)" }}>
                         {m.department ?? "-"}
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
+                      <td className="px-4 py-3 text-xs whitespace-nowrap" style={{ color: "var(--text-muted)" }}>
                         {m.phone ?? "-"}
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
+                      <td className="px-4 py-3 text-xs max-w-[160px] truncate" title={m.email ?? "-"} style={{ color: "var(--text-muted)" }}>
                         {m.email ?? "-"}
                       </td>
                       <td className="px-4 py-3">
@@ -561,28 +561,24 @@ export default function MembersPage() {
                         {m.created_at?.slice(0, 10) ?? "-"}
                       </td>
                       <td className="px-4 py-3">
-                        <div className="flex gap-2">
+                        <div className="flex items-center gap-1.5 whitespace-nowrap">
                           <Link href={`/members/${m.id}`}>
                             <Button size="sm" variant="ghost">상세</Button>
                           </Link>
-                          {m.status !== "inactive" && (
-                            <>
-                              <Button size="sm" variant="ghost" onClick={() => openEdit(m)}>
-                                수정
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => setConfirmTarget(m)}
-                              >
-                                비활성화
-                              </Button>
-                            </>
+                          {m.status !== "inactive" ? (
+                            <Button size="sm" variant="ghost" onClick={() => openEdit(m)}>수정</Button>
+                          ) : (
+                            <Button size="sm" variant="ghost" onClick={() => handleRestore(m.id)}>복구</Button>
                           )}
-                          {m.status === "inactive" && (
-                            <Button size="sm" variant="ghost" onClick={() => handleRestore(m.id)}>
-                              복구
-                            </Button>
+                          {m.status !== "inactive" && (
+                            <button
+                              className="text-xs px-2 py-1 rounded-lg transition-all hover:opacity-75"
+                              style={{ color: "var(--text-muted)", border: "1px solid var(--border-soft)", background: "transparent" }}
+                              onClick={() => setConfirmTarget(m)}
+                              title="비활성화"
+                            >
+                              ⋯
+                            </button>
                           )}
                         </div>
                       </td>
@@ -590,6 +586,33 @@ export default function MembersPage() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+          {/* Mobile card list */}
+          {!loading && !error && members.length > 0 && (
+            <div className="md:hidden divide-y" style={{ borderTop: "1px solid var(--border-soft)" }}>
+              {members.map((m) => (
+                <div key={m.id} className="flex items-center gap-3 px-4 py-3"
+                  style={{ opacity: m.status === "inactive" ? 0.55 : 1 }}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Link href={`/members/${m.id}`} className="font-medium text-sm hover:underline" style={{ color: "var(--text-main)" }}>
+                        {m.name}
+                      </Link>
+                      <RoleBadge role={normalizeOfficerRole(m)} />
+                      <StatusBadge status={m.status} />
+                    </div>
+                    <p className="text-xs mt-0.5 truncate" style={{ color: "var(--text-muted)" }}>
+                      {[m.student_id, m.department].filter(Boolean).join(" · ") || "-"}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Link href={`/members/${m.id}`}>
+                      <Button size="sm" variant="ghost">상세</Button>
+                    </Link>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </Card>

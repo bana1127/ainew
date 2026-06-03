@@ -145,7 +145,7 @@ def _role_sort_key(m: Member) -> tuple:
 @router.get("", response_model=list[MemberRead])
 def list_members(
     skip: int = Query(default=0, ge=0),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=1000, ge=1, le=10000),
     status: str | None = None,
     q: str | None = None,
     is_executive: bool | None = Query(default=None),

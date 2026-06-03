@@ -7,22 +7,22 @@ import {
   ManualPaymentRecordPayload,
   Member,
   MembershipFeePreview,
+  MembershipPaymentHistoryItem,
   PaymentMatchingPreview,
   PaymentMatchingResult,
   PaymentRecord,
   PaymentSummary,
   TransactionMatchItem,
-  UnpaidPaymentItem,
   applyPaymentMatching,
   confirmPaymentTransaction,
   excludePaymentTransaction,
   getPaymentRecords,
   getPaymentSummary,
-  getUnpaidPayments,
+  getMembershipHistory,
   getMembersFiltered,
+  patchMembershipPaymentRecord,
   previewMembershipFees,
   previewPaymentMatching,
-  upsertManualPaymentRecord,
   confirmAssistantAction,
   unmatchPaymentRecord,
   setRefundRequired,
@@ -32,6 +32,7 @@ import {
 } from "@/lib/api";
 
 import { AppShell } from "@/components/layout/AppShell";
+import { MembershipBulkUpdateModal } from "@/components/payments/MembershipBulkUpdateModal";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -66,6 +67,36 @@ const inputStyle: React.CSSProperties = {
   width: "100%",
 };
 
+function BulkActionBar({
+  selectedCount,
+  onClear,
+  onOpen,
+}: {
+  selectedCount: number;
+  onClear: () => void;
+  onOpen: () => void;
+}) {
+  if (selectedCount === 0) return null;
+  return (
+    <div
+      className="flex flex-col gap-3 px-5 py-3 sm:flex-row sm:items-center sm:justify-between"
+      style={{ background: "var(--primary-soft)", borderBottom: "1px solid var(--border-soft)" }}
+    >
+      <p className="text-sm font-medium" style={{ color: "var(--text-main)" }}>
+        {selectedCount}건 선택됨
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="secondary" onClick={onClear}>
+          선택 해제
+        </Button>
+        <Button size="sm" onClick={onOpen}>
+          일괄 변경
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Membership Fee Tab ───────────────────────────────────────────────────────
 
 function MembershipFeeTab() {
@@ -90,9 +121,18 @@ function MembershipFeeTab() {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const [summary, setSummary] = useState<PaymentSummary | null>(null);
-  const [unpaid, setUnpaid] = useState<UnpaidPaymentItem[]>([]);
   const [records, setRecords] = useState<PaymentRecord[]>([]);
+  const [history, setHistory] = useState<MembershipPaymentHistoryItem[]>([]);
+  const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>([]);
+  const lastSelectionIndexRef = useRef<number | null>(null);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [tierFilter, setTierFilter] = useState("all");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [recordSearch, setRecordSearch] = useState("");
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [loadingData, setLoadingData] = useState(false);
+  const [memberPageSize, setMemberPageSize] = useState<number | "all">("all");
+  const [memberPage, setMemberPage] = useState(1);
 
   const [confirmTarget, setConfirmTarget] = useState<TransactionMatchItem | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -100,7 +140,7 @@ function MembershipFeeTab() {
   const [confirming, setConfirming] = useState(false);
   const [excluding, setExcluding] = useState<string | null>(null);
 
-  const [manualTarget, setManualTarget] = useState<UnpaidPaymentItem | null>(null);
+  const [manualTarget, setManualTarget] = useState<PaymentRecord | null>(null);
   const [manualForm, setManualForm] = useState<ManualPaymentRecordPayload>({
     member_id: "", period: "2026-1", payment_type: "membership_fee",
     required_amount: 0, paid_amount: 0, status: "paid",
@@ -111,14 +151,15 @@ function MembershipFeeTab() {
   async function loadData(p = period) {
     setLoadingData(true);
     try {
-      const [s, u, r] = await Promise.all([
+      const [s, r, h] = await Promise.all([
         getPaymentSummary({ period: p, payment_type: "membership_fee" }),
-        getUnpaidPayments({ period: p, payment_type: "membership_fee" }),
         getPaymentRecords({ period: p, payment_type: "membership_fee" }),
+        getMembershipHistory({ period: p, limit: 100 }),
       ]);
       setSummary(s);
-      setUnpaid(u);
       setRecords(r);
+      setHistory(h);
+      setSelectedRecordIds((current) => current.filter((id) => r.some((record) => record.id === id)));
     } catch { /* silently ignore */ }
     finally { setLoadingData(false); }
   }
@@ -240,9 +281,9 @@ function MembershipFeeTab() {
     } finally { setExcluding(null); }
   }
 
-  function openManualEdit(item: UnpaidPaymentItem) {
+  function openManualEdit(item: PaymentRecord) {
     const initStatus = (item.status as ManualPaymentRecordPayload["status"]) ?? "unpaid";
-    const initPaid = initStatus === "paid" ? (item.paid_amount || requiredAmount) : item.paid_amount;
+    const initPaid = initStatus === "paid" ? (item.paid_amount || item.required_amount) : item.paid_amount;
     setManualTarget(item);
     setManualForm({
       member_id: item.member_id,
@@ -251,6 +292,7 @@ function MembershipFeeTab() {
       required_amount: item.required_amount || requiredAmount,
       paid_amount: initPaid,
       status: initStatus,
+      manual_note: item.manual_note ?? null,
     });
     setManualError(null);
   }
@@ -259,7 +301,13 @@ function MembershipFeeTab() {
     setManualSaving(true);
     setManualError(null);
     try {
-      await upsertManualPaymentRecord(manualForm);
+      if (!manualTarget) throw new Error("수정할 납부 기록을 찾을 수 없습니다.");
+      await patchMembershipPaymentRecord(manualTarget.id, {
+        required_amount: manualForm.required_amount,
+        paid_amount: manualForm.paid_amount,
+        status: manualForm.status,
+        manual_note: manualForm.manual_note ?? null,
+      });
       setManualTarget(null);
       await loadData(period);
     } catch (err: unknown) {
@@ -273,6 +321,73 @@ function MembershipFeeTab() {
     else if (newStatus === "unpaid" || newStatus === "exempt") newPaid = 0;
     setManualForm((f) => ({ ...f, status: newStatus as ManualPaymentRecordPayload["status"], paid_amount: newPaid }));
   }
+
+  function toggleRecordSelection(recordId: string, checked: boolean, shiftKey = false) {
+    const currentIndex = filteredRecords.findIndex((record) => record.id === recordId);
+    setSelectedRecordIds((current) => {
+      if (shiftKey && lastSelectionIndexRef.current !== null && currentIndex >= 0) {
+        const start = Math.min(lastSelectionIndexRef.current, currentIndex);
+        const end = Math.max(lastSelectionIndexRef.current, currentIndex);
+        const rangeIds = filteredRecords.slice(start, end + 1).map((record) => record.id);
+        if (checked) return Array.from(new Set([...current, ...rangeIds]));
+        return current.filter((id) => !rangeIds.includes(id));
+      }
+      if (checked) return current.includes(recordId) ? current : [...current, recordId];
+      return current.filter((id) => id !== recordId);
+    });
+    if (currentIndex >= 0) lastSelectionIndexRef.current = currentIndex;
+  }
+
+  function toggleAllRecords(checked: boolean) {
+    const filteredIds = filteredRecords.map((record) => record.id);
+    setSelectedRecordIds((current) => {
+      if (checked) return Array.from(new Set([...current, ...filteredIds]));
+      return current.filter((id) => !filteredIds.includes(id));
+    });
+  }
+
+  function sourceLabel(record: PaymentRecord): string {
+    if (record.payment_source === "transaction_match" || record.transaction_id) return "거래매칭";
+    if (record.payment_source === "manual") return "수동";
+    if (record.payment_source === "imported") return "가져오기";
+    return "없음";
+  }
+
+  const filteredRecords = records.filter((record) => {
+    if (statusFilter !== "all" && record.status !== statusFilter) return false;
+    if (tierFilter !== "all" && (record.fee_tier ?? "") !== tierFilter) return false;
+    const source = sourceLabel(record);
+    if (sourceFilter !== "all" && source !== sourceFilter) return false;
+    const q = recordSearch.trim().toLowerCase();
+    if (q) {
+      const haystack = [
+        record.member_name,
+        record.student_id,
+        record.department,
+        record.manual_note,
+        record.fee_rule_reason,
+      ].filter(Boolean).join(" ").toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  });
+
+  const pagedRecords = memberPageSize === "all"
+    ? filteredRecords
+    : filteredRecords.slice((memberPage - 1) * (memberPageSize as number), memberPage * (memberPageSize as number));
+  const totalMemberPages = memberPageSize === "all" ? 1 : Math.ceil(filteredRecords.length / (memberPageSize as number));
+
+  const statusFilterLabel =
+    statusFilter === "unpaid" ? "미납" :
+    statusFilter === "paid" ? "납부완료" :
+    statusFilter === "partial" ? "부분납부" :
+    statusFilter === "need_check" ? "확인필요" :
+    statusFilter === "exempt" ? "면제" :
+    statusFilter === "overpaid" ? "초과납부" : "전체";
+
+  const selectedRecordIdSet = new Set(selectedRecordIds);
+  const selectedRecords = records.filter((record) => selectedRecordIdSet.has(record.id));
+  const allRecordsSelected = filteredRecords.length > 0 && filteredRecords.every((record) => selectedRecordIdSet.has(record.id));
 
   const tblHeader = (labels: string[]) => (
     <tr style={{ background: "var(--surface-soft)", borderBottom: "1px solid var(--border-soft)" }}>
@@ -431,6 +546,7 @@ function MembershipFeeTab() {
               { label: "미납", value: fmt(summary.unpaid_count), style: { background: "var(--danger-soft)", border: "1px solid rgba(185,74,72,0.15)" } },
               { label: "확인 필요", value: fmt(summary.need_check_count), style: { background: "var(--warning-soft)", border: "1px solid rgba(185,130,43,0.15)" } },
               { label: "면제", value: fmt(summary.exempt_count ?? 0), style: {} },
+              { label: "초과 납부", value: fmt(summary.overpaid_count ?? 0), style: {} },
               { label: "총 예정 금액", value: `${fmt(summary.total_required_amount)}원`, style: {} },
               { label: "총 납부 금액", value: `${fmt(summary.total_paid_amount)}원`, style: { background: "var(--success-soft)", border: "1px solid rgba(63,125,88,0.15)" } },
             ].map((card) => (
@@ -441,6 +557,12 @@ function MembershipFeeTab() {
               </div>
             ))}
           </div>
+          {(summary.missing_record_count ?? 0) > 0 && (
+            <div className="mt-4 rounded-xl px-4 py-3 text-sm"
+              style={{ background: "var(--warning-soft)", color: "var(--warning)", border: "1px solid rgba(185,130,43,0.15)" }}>
+              회비 대상 기록이 아직 생성되지 않은 부원이 {fmt(summary.missing_record_count)}명 있습니다. 상단의 회비 대상 생성/동기화를 실행하세요.
+            </div>
+          )}
         </section>
       )}
 
@@ -464,9 +586,9 @@ function MembershipFeeTab() {
                         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
                         onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
                         <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ color: "var(--text-muted)" }}>{fmtDt(item.transaction_datetime)}</td>
-                        <td className="px-4 py-2.5 max-w-[160px] truncate" style={{ color: "var(--text-main)" }}>{item.memo ?? "-"}</td>
-                        <td className="px-4 py-2.5 text-right font-medium" style={{ color: "var(--success)" }}>{fmt(item.deposit_amount)}원</td>
-                        <td className="px-4 py-2.5 text-right" style={{ color: "var(--text-main)" }}>{fmt(item.expected_amount)}원</td>
+                        <td className="px-4 py-2.5 max-w-[160px] truncate" title={item.memo ?? ""} style={{ color: "var(--text-main)" }}>{item.memo ?? "-"}</td>
+                        <td className="px-4 py-2.5 text-right font-medium whitespace-nowrap" style={{ color: "var(--success)" }}>{fmt(item.deposit_amount)}원</td>
+                        <td className="px-4 py-2.5 text-right whitespace-nowrap" style={{ color: "var(--text-main)" }}>{fmt(item.expected_amount)}원</td>
                         <td className="px-4 py-2.5 text-right" style={{ color: "var(--text-muted)" }}>
                           {item.amount_difference == null ? "-" : `${item.amount_difference > 0 ? "+" : ""}${fmt(item.amount_difference)}원`}
                         </td>
@@ -493,7 +615,7 @@ function MembershipFeeTab() {
                         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
                         onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
                         <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ color: "var(--text-muted)" }}>{fmtDt(item.transaction_datetime)}</td>
-                        <td className="px-4 py-2.5 max-w-[140px] truncate" style={{ color: "var(--text-main)" }}>{item.memo ?? "-"}</td>
+                        <td className="px-4 py-2.5 max-w-[140px] truncate" title={item.memo ?? ""} style={{ color: "var(--text-main)" }}>{item.memo ?? "-"}</td>
                         <td className="px-4 py-2.5" style={{ color: "var(--text-main)" }}>{item.matched_member_name ?? "-"}</td>
                         <td className="px-4 py-2.5 text-right" style={{ color: "var(--text-main)" }}>{fmt(item.expected_amount)}원</td>
                         <td className="px-4 py-2.5 text-right font-medium" style={{ color: "var(--text-main)" }}>{fmt(item.deposit_amount)}원</td>
@@ -520,102 +642,149 @@ function MembershipFeeTab() {
         </div>
       )}
 
-      {/* Unpaid */}
-      {unpaid.length > 0 && (
-        <Card padding="none">
-          <div className="p-5" style={{ background: "var(--danger-soft)", borderBottom: "1px solid var(--border-soft)" }}>
-            <h2 className="text-base font-semibold" style={{ color: "var(--danger)" }}>미납자 목록 ({unpaid.length}명)</h2>
-          </div>
-          {/* Desktop */}
-          <div className="hidden md:block overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>{tblHeader(["이름", "학번", "학과", "필요 금액", "납부 금액", "상태", "직접 수정"])}</thead>
-              <tbody>
-                {unpaid.map((item) => (
-                  <tr key={item.member_id} style={{ borderBottom: "1px solid var(--border-soft)" }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                    <td className="px-4 py-3 font-medium" style={{ color: "var(--text-main)" }}>
-                      <Link href={`/members/${item.member_id}`} className="hover:underline">{item.name}</Link>
-                    </td>
-                    <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{item.student_id ?? "-"}</td>
-                    <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{item.department ?? "-"}</td>
-                    <td className="px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>{fmt(item.required_amount)}원</td>
-                    <td className="px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>{fmt(item.paid_amount)}원</td>
-                    <td className="px-4 py-3"><StatusBadge status={item.status} /></td>
-                    <td className="px-4 py-3">
-                      <Button size="sm" variant="ghost" onClick={() => openManualEdit(item)}>직접 수정</Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {/* Mobile */}
-          <div className="md:hidden divide-y" style={{ borderTop: "1px solid var(--border-soft)" }}>
-            {unpaid.map((item) => (
-              <div key={item.member_id} className="p-4 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Link href={`/members/${item.member_id}`}>
-                      <p className="font-medium text-sm hover:underline" style={{ color: "var(--text-main)" }}>{item.name}</p>
-                    </Link>
-                    {item.student_id && <p className="text-xs" style={{ color: "var(--text-muted)" }}>{item.student_id} · {item.department ?? ""}</p>}
-                  </div>
-                  <StatusBadge status={item.status} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm" style={{ color: "var(--text-muted)" }}>
-                    필요: {fmt(item.required_amount)}원 / 납부: {fmt(item.paid_amount)}원
-                  </span>
-                  <Button size="sm" variant="ghost" onClick={() => openManualEdit(item)}>직접 수정</Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
-
       {/* Records */}
       <Card padding="none">
         <div className="p-5" style={{ borderBottom: "1px solid var(--border-soft)" }}>
-          <h2 className="text-base font-semibold" style={{ color: "var(--text-main)" }}>납부 기록</h2>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-base font-semibold" style={{ color: "var(--text-main)" }}>회비 납부 현황</h2>
+              <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                {statusFilter !== "all" ? `${statusFilterLabel} ${filteredRecords.length}명` : `전체 ${records.length}명`} 중{" "}
+                {pagedRecords.length}명 표시
+                {selectedRecords.length > 0 && ` · ${selectedRecords.length}명 선택됨`}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs whitespace-nowrap" style={{ color: "var(--text-muted)" }}>표시 개수</label>
+              <select
+                className="rounded-xl px-2 py-1 text-sm focus:outline-none"
+                style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)" }}
+                value={String(memberPageSize)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setMemberPageSize(v === "all" ? "all" : Number(v));
+                  setMemberPage(1);
+                }}
+              >
+                <option value="50">50명</option>
+                <option value="100">100명</option>
+                <option value="all">전체</option>
+              </select>
+            </div>
+          </div>
         </div>
-        {records.length === 0 ? (
-          <EmptyState message="납부 기록이 없습니다." description="매칭 적용 후 납부 기록이 생성됩니다." />
+        <div className="grid grid-cols-1 gap-3 p-5 sm:grid-cols-2 lg:grid-cols-4"
+          style={{ borderBottom: "1px solid var(--border-soft)" }}>
+          <div>
+            <label className="mb-1 block text-xs font-medium" style={{ color: "var(--text-muted)" }}>상태</label>
+            <select style={inputStyle} className="min-h-[44px] focus:outline-none" value={statusFilter}
+              onChange={(event) => { setStatusFilter(event.target.value); setMemberPage(1); }}>
+              <option value="all">전체</option>
+              <option value="unpaid">미납</option>
+              <option value="paid">납부 완료</option>
+              <option value="partial">부분 납부</option>
+              <option value="need_check">확인 필요</option>
+              <option value="exempt">면제</option>
+              <option value="overpaid">초과 납부</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium" style={{ color: "var(--text-muted)" }}>검색</label>
+            <input style={inputStyle} className="min-h-[44px] focus:outline-none"
+              value={recordSearch}
+              onChange={(event) => { setRecordSearch(event.target.value); setMemberPage(1); }}
+              placeholder="이름 / 학번 / 학과" />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium" style={{ color: "var(--text-muted)" }}>구분</label>
+            <select style={inputStyle} className="min-h-[44px] focus:outline-none" value={tierFilter}
+              onChange={(event) => { setTierFilter(event.target.value); setMemberPage(1); }}>
+              <option value="all">전체</option>
+              <option value="new">신규</option>
+              <option value="existing">기존</option>
+              <option value="executive">임원</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium" style={{ color: "var(--text-muted)" }}>확인 방식</label>
+            <select style={inputStyle} className="min-h-[44px] focus:outline-none" value={sourceFilter}
+              onChange={(event) => { setSourceFilter(event.target.value); setMemberPage(1); }}>
+              <option value="all">전체</option>
+              <option value="거래매칭">거래매칭</option>
+              <option value="수동">수동</option>
+              <option value="없음">없음</option>
+            </select>
+          </div>
+        </div>
+        <BulkActionBar
+          selectedCount={selectedRecords.length}
+          onClear={() => setSelectedRecordIds([])}
+          onOpen={() => setBulkModalOpen(true)}
+        />
+        {filteredRecords.length === 0 ? (
+          <EmptyState message="표시할 회비 납부 현황이 없습니다." description="필터를 조정하거나 회비 대상 생성/동기화를 실행하세요." />
         ) : (
           <>
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>{tblHeader(["부원명", "학번", "가입 시기", "직위", "구분", "기간", "필요 금액", "납부 금액", "상태", "산정 사유", "매칭 취소"])}</thead>
+              <table className="w-full text-sm" style={{ minWidth: 1080 }}>
+                <thead>
+                  <tr style={{ background: "var(--surface-soft)", borderBottom: "1px solid var(--border-soft)" }}>
+                    <th className="w-12 px-4 py-3 text-left">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4"
+                        checked={allRecordsSelected}
+                        onChange={(event) => toggleAllRecords(event.target.checked)}
+                        aria-label="전체 납부 기록 선택"
+                      />
+                    </th>
+                    {["부원명", "학번", "학과", "구분", "필요 금액", "납부 금액", "상태", "확인 방식", "메모", "작업"].map((h) => (
+                      <th key={h} className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide"
+                        style={{ color: "var(--text-muted)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
                 <tbody>
-                  {records.map((r) => (
+                  {pagedRecords.map((r) => (
                     <tr key={r.id} style={{ borderBottom: "1px solid var(--border-soft)" }}
                       onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
                       onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                      <td className="px-4 py-3 font-medium" style={{ color: "var(--text-main)" }}>
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4"
+                          checked={selectedRecordIdSet.has(r.id)}
+                          onChange={(event) => toggleRecordSelection(
+                            r.id,
+                            event.target.checked,
+                            (event.nativeEvent as MouseEvent).shiftKey,
+                          )}
+                          aria-label={`${r.member_name ?? "부원"} 납부 기록 선택`}
+                        />
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 font-medium" style={{ color: "var(--text-main)" }}>
                         <Link href={`/members/${r.member_id}`} className="hover:underline">
                           {r.member_name ?? "알 수 없는 부원"}
                         </Link>
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{r.student_id ?? "-"}</td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{r.joined_term ?? "-"}</td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "var(--text-main)" }}>
-                        {r.fee_tier === "executive" ? "임원" : "일반 부원"}
-                      </td>
-                      <td className="px-4 py-3 text-xs font-medium" style={{ color: "var(--text-main)" }}>{feeTierLabel(r.fee_tier)}</td>
-                      <td className="px-4 py-3" style={{ color: "var(--text-main)" }}>{r.period}</td>
-                      <td className="px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>{fmt(r.required_amount)}원</td>
-                      <td className="px-4 py-3 text-right font-medium" style={{ color: "var(--text-main)" }}>{fmt(r.paid_amount)}원</td>
-                      <td className="px-4 py-3"><StatusBadge status={r.status} /></td>
-                      <td className="px-4 py-3 text-xs min-w-[220px]" style={{ color: "var(--text-muted)" }}>{r.fee_rule_reason ?? "-"}</td>
-                      <td className="px-4 py-3">
-                        {r.transaction_id && (
-                          <Button size="sm" variant="ghost" disabled={unmatching === r.id}
-                            onClick={() => handleUnmatchRecord(r.id)}>
-                            {unmatching === r.id ? "..." : "매칭 취소"}
-                          </Button>
-                        )}
+                      <td className="whitespace-nowrap px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{r.student_id ?? "-"}</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{r.department ?? "-"}</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-xs font-medium" style={{ color: "var(--text-main)" }}>{feeTierLabel(r.fee_tier)}</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>{fmt(r.required_amount)}원</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right font-medium" style={{ color: "var(--text-main)" }}>{fmt(r.paid_amount)}원</td>
+                      <td className="whitespace-nowrap px-4 py-3"><StatusBadge status={r.status} /></td>
+                      <td className="whitespace-nowrap px-4 py-3 text-xs" style={{ color: "var(--text-main)" }}>{sourceLabel(r)}</td>
+                      <td className="px-4 py-3 text-xs min-w-[180px]" style={{ color: "var(--text-muted)" }}>{r.manual_note ?? r.fee_rule_reason ?? "-"}</td>
+                      <td className="whitespace-nowrap px-4 py-3">
+                        <div className="flex gap-2">
+                          <Button size="sm" variant="ghost" onClick={() => openManualEdit(r)}>직접 수정</Button>
+                          {r.transaction_id && (
+                            <Button size="sm" variant="ghost" disabled={unmatching === r.id}
+                              onClick={() => handleUnmatchRecord(r.id)}>
+                              {unmatching === r.id ? "..." : "매칭 취소"}
+                            </Button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -623,26 +792,114 @@ function MembershipFeeTab() {
               </table>
             </div>
             <div className="md:hidden divide-y" style={{ borderTop: "1px solid var(--border-soft)" }}>
-              {records.map((r) => (
+              {pagedRecords.map((r) => (
                 <div key={r.id} className="p-4 space-y-1">
-                  <div className="flex items-center justify-between">
-                    <Link href={`/members/${r.member_id}`}>
-                      <p className="font-medium text-sm hover:underline" style={{ color: "var(--text-main)" }}>
-                        {r.member_name ?? "알 수 없는 부원"}
-                      </p>
-                    </Link>
-                    <StatusBadge status={r.status} />
+                  <div className="flex items-start justify-between gap-3">
+                    <label className="flex min-w-0 items-start gap-3">
+                      <input
+                        type="checkbox"
+                        className="mt-1 h-4 w-4 shrink-0"
+                        checked={selectedRecordIdSet.has(r.id)}
+                        onChange={(event) => toggleRecordSelection(
+                          r.id,
+                          event.target.checked,
+                          (event.nativeEvent as MouseEvent).shiftKey,
+                        )}
+                        aria-label={`${r.member_name ?? "부원"} 납부 기록 선택`}
+                      />
+                      <Link href={`/members/${r.member_id}`} className="min-w-0">
+                        <p className="truncate font-medium text-sm hover:underline" style={{ color: "var(--text-main)" }}>
+                          {r.member_name ?? "알 수 없는 부원"}
+                        </p>
+                      </Link>
+                    </label>
+                    <div className="shrink-0"><StatusBadge status={r.status} /></div>
                   </div>
                   <p className="text-xs" style={{ color: "var(--text-muted)" }}>
                     {r.period} · 필요 {fmt(r.required_amount)}원 / 납부 {fmt(r.paid_amount)}원
                   </p>
                   <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                    {r.joined_term ?? "-"} · {feeTierLabel(r.fee_tier)} · {r.fee_rule_reason ?? "-"}
+                    {r.department ?? "-"} · {feeTierLabel(r.fee_tier)} · {sourceLabel(r)}
                   </p>
+                  {(r.manual_note || r.fee_rule_reason) && (
+                    <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                      {r.manual_note ?? r.fee_rule_reason}
+                    </p>
+                  )}
+                  <div className="flex flex-wrap gap-2 pt-2">
+                    <Button size="sm" variant="ghost" onClick={() => openManualEdit(r)}>직접 수정</Button>
+                    {r.transaction_id && (
+                      <Button size="sm" variant="ghost" disabled={unmatching === r.id}
+                        onClick={() => handleUnmatchRecord(r.id)}>
+                        {unmatching === r.id ? "..." : "매칭 취소"}
+                      </Button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
           </>
+        )}
+        {memberPageSize !== "all" && totalMemberPages > 1 && (
+          <div className="flex items-center justify-center gap-3 p-4" style={{ borderTop: "1px solid var(--border-soft)" }}>
+            <Button size="sm" variant="ghost" disabled={memberPage <= 1} onClick={() => setMemberPage((p) => p - 1)}>이전</Button>
+            <span className="text-sm" style={{ color: "var(--text-muted)" }}>
+              {memberPage} / {totalMemberPages} 페이지 (필터 결과 {filteredRecords.length}명)
+            </span>
+            <Button size="sm" variant="ghost" disabled={memberPage >= totalMemberPages} onClick={() => setMemberPage((p) => p + 1)}>다음</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setMemberPageSize("all"); setMemberPage(1); }}>전체 보기</Button>
+          </div>
+        )}
+      </Card>
+
+      <MembershipBulkUpdateModal
+        isOpen={bulkModalOpen}
+        period={period}
+        selectedRecords={selectedRecords}
+        onClose={() => setBulkModalOpen(false)}
+        onCompleted={async () => {
+          await loadData(period);
+          setSelectedRecordIds([]);
+        }}
+      />
+
+      <Card padding="none">
+        <div className="p-5" style={{ borderBottom: "1px solid var(--border-soft)" }}>
+          <h2 className="text-base font-semibold" style={{ color: "var(--text-main)" }}>납부 기록 / 변경 이력</h2>
+          <p className="mt-1 text-xs" style={{ color: "var(--text-muted)" }}>
+            거래내역 매칭, 수동 처리, 일괄 수정으로 발생한 상태 변경을 확인합니다.
+          </p>
+        </div>
+        {history.length === 0 ? (
+          <EmptyState message="변경 이력이 없습니다." description="수동 수정 또는 일괄 수정 후 이력이 표시됩니다." />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm" style={{ minWidth: 920 }}>
+              <thead>{tblHeader(["처리 일시", "대상자", "작업 유형", "변경 전 상태", "변경 후 상태", "변경 전 금액", "변경 후 금액", "처리 방식", "메모"])}</thead>
+              <tbody>
+                {history.map((item) => (
+                  <tr key={item.id} style={{ borderBottom: "1px solid var(--border-soft)" }}>
+                    <td className="whitespace-nowrap px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{fmtDt(item.created_at)}</td>
+                    <td className="whitespace-nowrap px-4 py-3 font-medium" style={{ color: "var(--text-main)" }}>
+                      {item.member_name}
+                      {item.student_id ? <span className="ml-1 text-xs" style={{ color: "var(--text-muted)" }}>({item.student_id})</span> : null}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-xs" style={{ color: "var(--text-main)" }}>{item.action}</td>
+                    <td className="whitespace-nowrap px-4 py-3">{item.previous_status ? <StatusBadge status={item.previous_status} /> : "-"}</td>
+                    <td className="whitespace-nowrap px-4 py-3">{item.new_status ? <StatusBadge status={item.new_status} /> : "-"}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>{fmt(item.previous_paid_amount)}원</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>{fmt(item.new_paid_amount)}원</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-xs" style={{ color: "var(--text-main)" }}>
+                      {item.payment_source === "transaction_match" ? "거래매칭" : item.payment_source === "manual" ? "수동" : item.action.includes("bulk") ? "일괄수정" : "없음"}
+                    </td>
+                    <td className="px-4 py-3 text-xs min-w-[180px]" style={{ color: "var(--text-muted)" }}>
+                      {item.manual_note ?? item.reason ?? "-"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </Card>
 
@@ -655,7 +912,8 @@ function MembershipFeeTab() {
             <h3 className="text-base font-semibold" style={{ color: "var(--text-main)" }}>납부 상태 직접 수정</h3>
             <div className="rounded-xl p-3 text-sm"
               style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
-              <p className="font-medium" style={{ color: "var(--text-main)" }}>{manualTarget.name}</p>
+              <p className="font-medium" style={{ color: "var(--text-main)" }}>{manualTarget.member_name ?? "이름 없는 부원"}</p>
+              <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>{manualTarget.student_id ?? "-"} · {manualTarget.department ?? "-"}</p>
               <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>거래내역 매칭 없이 납부 상태를 직접 기록합니다.</p>
             </div>
             <div className="space-y-3">
@@ -670,6 +928,7 @@ function MembershipFeeTab() {
                   <option value="partial">부분 납부</option>
                   <option value="need_check">확인 필요</option>
                   <option value="exempt">면제</option>
+                  <option value="overpaid">초과 납부</option>
                 </select>
               </div>
               <div>
@@ -685,6 +944,13 @@ function MembershipFeeTab() {
                   style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)", fontSize: 16 }}
                   value={manualForm.paid_amount}
                   onChange={(e) => setManualForm((f) => ({ ...f, paid_amount: Number(e.target.value) }))} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-muted)" }}>메모</label>
+                <textarea className="min-h-[72px] w-full rounded-xl px-3 py-2 text-sm focus:outline-none"
+                  style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)", fontSize: 16 }}
+                  value={manualForm.manual_note ?? ""}
+                  onChange={(e) => setManualForm((f) => ({ ...f, manual_note: e.target.value }))} />
               </div>
             </div>
             {manualError && <p className="text-sm" style={{ color: "var(--danger)" }}>{manualError}</p>}

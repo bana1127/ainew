@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.models import BudgetCategory, BudgetPlan
+from app.schemas.budget import (
+    BudgetCategoryCreate,
+    BudgetCategoryRead,
+    BudgetCategoryUpdate,
+    BudgetPlanCreate,
+    BudgetPlanRead,
+    BudgetPlanUpdate,
+    TransactionClassifyPayload,
+)
+from app.services.budget_review_service import (
+    confirm_transaction_classification,
+    get_review_items,
+    preview_transaction_classification,
+    resolve_review_item,
+)
+from app.services.budget_service import (
+    ensure_default_categories,
+    get_activity_settlements,
+    get_budget_cashflow,
+    get_budget_summary,
+    get_budget_vs_actual,
+    parse_date_filter,
+    upsert_budget_plan,
+)
+
+
+router = APIRouter()
+
+
+def _dates(start_date: str | None, end_date: str | None):
+    try:
+        return parse_date_filter(start_date), parse_date_filter(end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date filter: {exc}")
+
+
+@router.get("/summary")
+def budget_summary(
+    period: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    start, end = _dates(start_date, end_date)
+    return get_budget_summary(db, period=period, start_date=start, end_date=end)
+
+
+@router.get("/cashflow")
+def budget_cashflow(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    start, end = _dates(start_date, end_date)
+    return get_budget_cashflow(db, start_date=start, end_date=end)
+
+
+@router.get("/categories", response_model=list[BudgetCategoryRead])
+def list_budget_categories(
+    include_inactive: bool = Query(False),
+    db: Session = Depends(get_db),
+) -> list[BudgetCategory]:
+    ensure_default_categories(db)
+    stmt = select(BudgetCategory)
+    if not include_inactive:
+        stmt = stmt.where(BudgetCategory.is_active.is_(True))
+    return list(db.scalars(stmt.order_by(BudgetCategory.type, BudgetCategory.sort_order, BudgetCategory.name)))
+
+
+@router.post("/categories", response_model=BudgetCategoryRead)
+def create_budget_category(
+    payload: BudgetCategoryCreate,
+    db: Session = Depends(get_db),
+) -> BudgetCategory:
+    if payload.type not in {"income", "expense"}:
+        raise HTTPException(status_code=400, detail="type must be income or expense")
+    category = BudgetCategory(**payload.model_dump())
+    db.add(category)
+    db.commit()
+    db.refresh(category)
+    return category
+
+
+@router.patch("/categories/{category_id}", response_model=BudgetCategoryRead)
+def update_budget_category(
+    category_id: UUID,
+    payload: BudgetCategoryUpdate,
+    db: Session = Depends(get_db),
+) -> BudgetCategory:
+    category = db.get(BudgetCategory, category_id)
+    if category is None:
+        raise HTTPException(status_code=404, detail="Budget category not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "type" in data and data["type"] not in {"income", "expense"}:
+        raise HTTPException(status_code=400, detail="type must be income or expense")
+    for key, value in data.items():
+        setattr(category, key, value)
+    db.commit()
+    db.refresh(category)
+    return category
+
+
+@router.get("/plans", response_model=list[BudgetPlanRead])
+def list_budget_plans(
+    period: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[BudgetPlan]:
+    stmt = select(BudgetPlan)
+    if period:
+        stmt = stmt.where(BudgetPlan.period == period)
+    return list(db.scalars(stmt))
+
+
+@router.post("/plans", response_model=BudgetPlanRead)
+def create_budget_plan(
+    payload: BudgetPlanCreate,
+    db: Session = Depends(get_db),
+) -> BudgetPlan:
+    if db.get(BudgetCategory, payload.category_id) is None:
+        raise HTTPException(status_code=404, detail="Budget category not found")
+    return upsert_budget_plan(
+        db,
+        period=payload.period,
+        category_id=payload.category_id,
+        planned_amount=payload.planned_amount,
+        note=payload.note,
+    )
+
+
+@router.patch("/plans/{plan_id}", response_model=BudgetPlanRead)
+def update_budget_plan(
+    plan_id: UUID,
+    payload: BudgetPlanUpdate,
+    db: Session = Depends(get_db),
+) -> BudgetPlan:
+    plan = db.get(BudgetPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Budget plan not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "category_id" in data and db.get(BudgetCategory, data["category_id"]) is None:
+        raise HTTPException(status_code=404, detail="Budget category not found")
+    for key, value in data.items():
+        setattr(plan, key, value)
+    db.commit()
+    db.refresh(plan)
+    return plan
+
+
+@router.get("/budget-vs-actual")
+def budget_vs_actual(
+    period: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    start, end = _dates(start_date, end_date)
+    return get_budget_vs_actual(db, period=period, start_date=start, end_date=end)
+
+
+@router.get("/activity-settlements")
+def budget_activity_settlements(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    start, end = _dates(start_date, end_date)
+    return get_activity_settlements(db, start_date=start, end_date=end)
+
+
+@router.get("/review-items")
+def budget_review_items(
+    period: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    start, end = _dates(start_date, end_date)
+    return get_review_items(db, period=period, start_date=start, end_date=end)
+
+
+@router.post("/review-items/{item_id}/resolve")
+def resolve_budget_review_item(
+    item_id: str,
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return resolve_review_item(db, item_id=item_id, note=(payload or {}).get("note"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/transactions/{transaction_id}/classify-preview")
+def budget_transaction_classify_preview(
+    transaction_id: UUID,
+    payload: TransactionClassifyPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return preview_transaction_classification(
+            db,
+            transaction_id=transaction_id,
+            payload=payload.model_dump(exclude_unset=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/transactions/classify-confirm")
+def budget_transaction_classify_confirm(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return confirm_transaction_classification(db, action_id=UUID(str(payload["action_id"])))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/transactions/{transaction_id}/classify-confirm")
+def budget_transaction_classify_confirm_for_transaction(
+    transaction_id: UUID,
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    # transaction_id is kept for API ergonomics; action_id still drives safe confirmation.
+    return budget_transaction_classify_confirm(payload, db)

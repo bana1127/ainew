@@ -705,24 +705,24 @@ export function AssistantResultCard({
 
       {/* Actions */}
       {!isCancelled && (
-        <div className="mt-5 flex flex-wrap items-center gap-3">
+        <div className="mt-5 flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2">
           {canApply && onApplyClick && (
             <Button onClick={onApplyClick} loading={applying}>
               확인 후 반영
             </Button>
           )}
+          {canApply && onCancel && (
+            <Button variant="ghost" onClick={onCancel}>
+              취소
+            </Button>
+          )}
           {detailHref && (
-            <Link href={detailHref}>
+            <Link href={detailHref} className="sm:ml-auto">
               <Button variant="secondary">
                 <ExternalLink className="h-3.5 w-3.5" />
                 {detailLabel}
               </Button>
             </Link>
-          )}
-          {canApply && onCancel && (
-            <Button variant="ghost" onClick={onCancel}>
-              취소
-            </Button>
           )}
           {isApplied && detailHref && (
             <Link href={detailHref}>

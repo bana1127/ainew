@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { FloatingAssistant } from "@/components/assistant/FloatingAssistant";
 import { Header } from "@/components/layout/Header";
 import { Sidebar } from "@/components/layout/Sidebar";
 
@@ -38,6 +39,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
+      <FloatingAssistant />
     </div>
   );
 }

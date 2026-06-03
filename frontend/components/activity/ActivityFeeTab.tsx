@@ -136,18 +136,20 @@ function ActivityFeeSettingsPanel({
 // ─── 2. 활동비 요약 카드 ──────────────────────────────────────────────────────
 
 function ActivityFeeSummaryCards({ records }: { records: ActivityFeeRecord[] }) {
-  const paid = records.filter((r) => r.status === "paid").length;
-  const unpaid = records.filter((r) => r.status === "unpaid").length;
-  const partial = records.filter((r) => r.status === "partial").length;
-  const overpaid = records.filter((r) => r.status === "overpaid").length;
-  const refundNeeded = records.filter(
+  // Exclude cancelled records from summary calculations
+  const activeRecords = records.filter((r) => r.status !== "cancelled");
+  const paid = activeRecords.filter((r) => r.status === "paid").length;
+  const unpaid = activeRecords.filter((r) => r.status === "unpaid").length;
+  const partial = activeRecords.filter((r) => r.status === "partial").length;
+  const overpaid = activeRecords.filter((r) => r.status === "overpaid").length;
+  const refundNeeded = activeRecords.filter(
     (r) => r.refund_status === "refund_required" || r.refund_status === "refund_pending",
   ).length;
-  const totalRequired = records.reduce((s, r) => s + r.required_amount, 0);
-  const totalPaid = records.reduce((s, r) => s + r.paid_amount, 0);
+  const totalRequired = activeRecords.reduce((s, r) => s + r.required_amount, 0);
+  const totalPaid = activeRecords.reduce((s, r) => s + r.paid_amount, 0);
 
   const cards = [
-    { label: "참가자", value: `${records.length}명`, color: "var(--text-main)" },
+    { label: "참가자", value: `${activeRecords.length}명`, color: "var(--text-main)" },
     { label: "납부 완료", value: `${paid}명`, color: "var(--success)" },
     { label: "미납", value: `${unpaid}명`, color: unpaid > 0 ? "var(--danger)" : "var(--text-muted)" },
     { label: "부분 납부", value: `${partial}명`, color: partial > 0 ? "var(--warning)" : "var(--text-muted)" },
@@ -829,6 +831,11 @@ function ActivityFeeRecordsTable({
   } | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [showCancelled, setShowCancelled] = useState(false);
+
+  const activeRecords = records.filter((r) => r.status !== "cancelled");
+  const cancelledRecords = records.filter((r) => r.status === "cancelled");
+  const displayedRecords = showCancelled ? records : activeRecords;
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -870,20 +877,31 @@ function ActivityFeeRecordsTable({
   return (
     <>
       <Card padding="none">
-        <div className="p-4" style={{ borderBottom: "1px solid var(--border-soft)" }}>
+        <div className="p-4 flex flex-wrap items-center justify-between gap-3" style={{ borderBottom: "1px solid var(--border-soft)" }}>
           <h3 className="text-sm font-semibold" style={{ color: "var(--text-main)" }}>
-            납부 현황 ({records.length}명)
+            납부 현황 ({activeRecords.length}명
+            {cancelledRecords.length > 0 && <span className="ml-1 text-xs font-normal" style={{ color: "var(--text-muted)" }}>/ 제외 {cancelledRecords.length}명</span>}
+            )
           </h3>
+          {cancelledRecords.length > 0 && (
+            <button
+              className="text-xs underline"
+              style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }}
+              onClick={() => setShowCancelled((v) => !v)}
+            >
+              {showCancelled ? "제외된 기록 숨기기" : `제외된 기록 보기 (${cancelledRecords.length}명)`}
+            </button>
+          )}
         </div>
         {/* Desktop table */}
         <div className="hidden md:block overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm" style={{ minWidth: 820 }}>
             <thead>
               <tr style={{ background: "var(--surface-soft)", borderBottom: "1px solid var(--border-soft)" }}>
                 {["이름", "학번", "필요 금액", "납부 금액", "상태", "환불 상태", "매칭 거래", "작업"].map((h) => (
                   <th
                     key={h}
-                    className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide"
+                    className="whitespace-nowrap px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide"
                     style={{ color: "var(--text-muted)" }}
                   >
                     {h}
@@ -892,7 +910,7 @@ function ActivityFeeRecordsTable({
               </tr>
             </thead>
             <tbody>
-              {records.map((r) => {
+              {displayedRecords.map((r) => {
                 const statusStyle = PAYMENT_STATUS_STYLE[r.status] ?? { bg: "var(--surface-soft)", text: "var(--text-muted)" };
                 const refundColor = REFUND_STATUS_STYLE[r.refund_status ?? "none"] ?? "var(--text-muted)";
                 const isMenuOpen = openMenuId === r.id;
@@ -903,30 +921,30 @@ function ActivityFeeRecordsTable({
                     onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
                     onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                   >
-                    <td className="px-3 py-3 font-medium" style={{ color: "var(--text-main)" }}>
+                    <td className="whitespace-nowrap px-3 py-3 font-medium" style={{ color: "var(--text-main)" }}>
                       {r.member_name ?? "-"}
                     </td>
-                    <td className="px-3 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
+                    <td className="whitespace-nowrap px-3 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
                       {r.student_id ?? "-"}
                     </td>
-                    <td className="px-3 py-3 text-right text-xs" style={{ color: "var(--text-main)" }}>
+                    <td className="whitespace-nowrap px-3 py-3 text-right text-xs" style={{ color: "var(--text-main)" }}>
                       {fmt(r.required_amount)}
                     </td>
-                    <td className="px-3 py-3 text-right text-xs" style={{ color: "var(--text-main)" }}>
+                    <td className="whitespace-nowrap px-3 py-3 text-right text-xs" style={{ color: "var(--text-main)" }}>
                       {fmt(r.paid_amount)}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="whitespace-nowrap px-3 py-2">
                       <span
-                        className="text-xs px-2 py-0.5 rounded-full"
+                        className="whitespace-nowrap text-xs px-2 py-0.5 rounded-full"
                         style={{ background: statusStyle.bg, color: statusStyle.text }}
                       >
                         {PAYMENT_STATUS_LABEL[r.status] ?? r.status}
                       </span>
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="whitespace-nowrap px-3 py-2">
                       {r.refund_status && r.refund_status !== "none" ? (
                         <span
-                          className="text-xs px-2 py-0.5 rounded-full"
+                          className="whitespace-nowrap text-xs px-2 py-0.5 rounded-full"
                           style={{ background: "var(--surface-soft)", color: refundColor }}
                         >
                           {REFUND_STATUS_LABEL[r.refund_status] ?? r.refund_status}
@@ -935,10 +953,10 @@ function ActivityFeeRecordsTable({
                         <span className="text-xs" style={{ color: "var(--text-muted)" }}>-</span>
                       )}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="whitespace-nowrap px-3 py-2">
                       {r.transaction_id ? (
                         <span
-                          className="text-xs px-2 py-0.5 rounded-full"
+                          className="whitespace-nowrap text-xs px-2 py-0.5 rounded-full"
                           style={{ background: "var(--success-soft)", color: "var(--success)" }}
                         >
                           매칭됨
@@ -947,7 +965,7 @@ function ActivityFeeRecordsTable({
                         <span className="text-xs" style={{ color: "var(--text-muted)" }}>-</span>
                       )}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="whitespace-nowrap px-3 py-2">
                       <div
                         className="flex items-center gap-1"
                         ref={isMenuOpen ? menuRef : undefined}
@@ -1027,7 +1045,7 @@ function ActivityFeeRecordsTable({
         </div>
         {/* Mobile cards */}
         <div className="md:hidden divide-y" style={{ borderTop: "1px solid var(--border-soft)" }}>
-          {records.map((r) => {
+          {displayedRecords.map((r) => {
             const statusStyle = PAYMENT_STATUS_STYLE[r.status] ?? { bg: "var(--surface-soft)", text: "var(--text-muted)" };
             return (
               <div key={r.id} className="p-4">
@@ -1039,7 +1057,7 @@ function ActivityFeeRecordsTable({
                     )}
                   </div>
                   <span
-                    className="text-xs px-2 py-0.5 rounded-full"
+                    className="whitespace-nowrap text-xs px-2 py-0.5 rounded-full"
                     style={{ background: statusStyle.bg, color: statusStyle.text }}
                   >
                     {PAYMENT_STATUS_LABEL[r.status] ?? r.status}

@@ -12,6 +12,8 @@ class PaymentRecordBase(ORMModel):
     paid_amount: int = 0
     status: str = "unpaid"
     transaction_id: UUID | None = None
+    payment_source: str | None = None
+    manual_note: str | None = None
 
 
 class PaymentRecordCreate(PaymentRecordBase):
@@ -29,6 +31,8 @@ class PaymentRecordUpdate(ORMModel):
     fee_rule_reason: str | None = None
     joined_term: str | None = None
     current_term: str | None = None
+    payment_source: str | None = None
+    manual_note: str | None = None
 
 
 class PaymentRecordRead(PaymentRecordBase):
@@ -49,3 +53,5 @@ class PaymentRecordRead(PaymentRecordBase):
     fee_rule_reason: str | None = None
     joined_term: str | None = None
     current_term: str | None = None
+    payment_source: str | None = None
+    manual_note: str | None = None

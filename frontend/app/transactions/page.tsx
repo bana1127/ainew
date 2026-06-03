@@ -57,10 +57,13 @@ export default function TransactionsPage() {
   const [filters, setFilters] = useState<TransactionQueryParams>({
     q: "", match_status: "", payment_type: "", start_date: "", end_date: "",
   });
+  const [txPageSize, setTxPageSize] = useState<number | "all">("all");
+  const [txPage, setTxPage] = useState(1);
 
   const loadTransactions = async (f: TransactionQueryParams = filters) => {
     setLoading(true);
     setListError(null);
+    setTxPage(1);
     try {
       const params: TransactionQueryParams = {};
       if (f.q) params.q = f.q;
@@ -155,6 +158,11 @@ export default function TransactionsPage() {
       setImporting(false);
     }
   };
+
+  const pagedTransactions = txPageSize === "all"
+    ? transactions
+    : transactions.slice((txPage - 1) * (txPageSize as number), txPage * (txPageSize as number));
+  const txTotalPages = txPageSize === "all" ? 1 : Math.ceil(transactions.length / (txPageSize as number));
 
   return (
     <AppShell>
@@ -341,14 +349,32 @@ export default function TransactionsPage() {
 
         {/* Saved transactions */}
         <Card padding="none">
-          <div className="flex items-center justify-between p-5"
+          <div className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between"
             style={{ borderBottom: "1px solid var(--border-soft)" }}>
-            <h2 className="text-base font-semibold" style={{ color: "var(--text-main)" }}>
-              저장된 거래내역
-            </h2>
-            <Button variant="ghost" size="sm" onClick={() => loadTransactions()}>
-              새로고침
-            </Button>
+            <div>
+              <h2 className="text-base font-semibold" style={{ color: "var(--text-main)" }}>저장된 거래내역</h2>
+              <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                전체 {transactions.length}건 중 {pagedTransactions.length}건 표시
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs whitespace-nowrap" style={{ color: "var(--text-muted)" }}>표시 개수</label>
+              <select
+                className="rounded-xl px-2 py-1 text-sm focus:outline-none"
+                style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)" }}
+                value={String(txPageSize)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setTxPageSize(v === "all" ? "all" : Number(v));
+                  setTxPage(1);
+                }}
+              >
+                <option value="50">50건</option>
+                <option value="100">100건</option>
+                <option value="all">전체</option>
+              </select>
+              <Button variant="ghost" size="sm" onClick={() => loadTransactions()}>새로고침</Button>
+            </div>
           </div>
 
           {/* Filters */}
@@ -439,7 +465,7 @@ export default function TransactionsPage() {
             <>
             {/* Mobile cards */}
             <div className="md:hidden divide-y" style={{ borderTop: "1px solid var(--border-soft)" }}>
-              {transactions.map((t) => (
+              {pagedTransactions.map((t) => (
                 <div key={t.id} className="p-4 space-y-1.5">
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-medium truncate max-w-[180px]" style={{ color: "var(--text-main)" }}>{t.memo ?? "-"}</p>
@@ -456,7 +482,7 @@ export default function TransactionsPage() {
             </div>
             {/* Desktop table */}
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm" style={{ minWidth: 1040 }}>
                 <thead>
                   <tr style={{ background: "var(--surface-soft)", borderBottom: "1px solid var(--border-soft)" }}>
                     {["거래일시", "구분", "적요", "출금액", "입금액", "잔액", "거래점", "매칭상태", "납부유형", "생성일", "매칭 취소", "환불 매칭"].map((h) => (
@@ -469,7 +495,7 @@ export default function TransactionsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {transactions.map((t) => (
+                  {pagedTransactions.map((t) => (
                     <tr key={t.id}
                       style={{ borderBottom: "1px solid var(--border-soft)" }}
                       onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
@@ -478,30 +504,30 @@ export default function TransactionsPage() {
                         style={{ color: "var(--text-muted)" }}>
                         {fmtDate(t.transaction_datetime)}
                       </td>
-                      <td className="px-4 py-3" style={{ color: "var(--text-main)" }}>
+                      <td className="px-4 py-3 whitespace-nowrap text-xs" style={{ color: "var(--text-main)" }}>
                         {t.transaction_type ?? "-"}
                       </td>
-                      <td className="px-4 py-3 max-w-[200px] truncate" style={{ color: "var(--text-main)" }}>
+                      <td className="px-4 py-3 max-w-[200px] truncate" title={t.memo ?? ""} style={{ color: "var(--text-main)" }}>
                         {t.memo ?? "-"}
                       </td>
-                      <td className="px-4 py-3 text-right font-medium"
+                      <td className="px-4 py-3 text-right font-medium whitespace-nowrap"
                         style={{ color: t.withdraw_amount ? "var(--danger)" : "var(--text-muted)" }}>
                         {t.withdraw_amount ? fmt(t.withdraw_amount) : "-"}
                       </td>
-                      <td className="px-4 py-3 text-right font-medium"
+                      <td className="px-4 py-3 text-right font-medium whitespace-nowrap"
                         style={{ color: t.deposit_amount ? "var(--success)" : "var(--text-muted)" }}>
                         {t.deposit_amount ? fmt(t.deposit_amount) : "-"}
                       </td>
-                      <td className="px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>
+                      <td className="px-4 py-3 text-right whitespace-nowrap" style={{ color: "var(--text-main)" }}>
                         {fmt(t.balance)}
                       </td>
-                      <td className="px-4 py-3" style={{ color: "var(--text-muted)" }}>
+                      <td className="px-4 py-3 max-w-[120px] truncate" title={t.branch ?? ""} style={{ color: "var(--text-muted)" }}>
                         {t.branch ?? "-"}
                       </td>
                       <td className="px-4 py-3">
                         <StatusBadge status={t.match_status} />
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
+                      <td className="px-4 py-3 text-xs whitespace-nowrap" style={{ color: "var(--text-muted)" }}>
                         {t.payment_type ?? "-"}
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap text-xs"
@@ -535,6 +561,16 @@ export default function TransactionsPage() {
               </table>
             </div>
             </>
+          )}
+          {txPageSize !== "all" && txTotalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 p-4" style={{ borderTop: "1px solid var(--border-soft)" }}>
+              <Button size="sm" variant="ghost" disabled={txPage <= 1} onClick={() => setTxPage((p) => p - 1)}>이전</Button>
+              <span className="text-sm" style={{ color: "var(--text-muted)" }}>
+                {txPage} / {txTotalPages} 페이지 (전체 {transactions.length}건)
+              </span>
+              <Button size="sm" variant="ghost" disabled={txPage >= txTotalPages} onClick={() => setTxPage((p) => p + 1)}>다음</Button>
+              <Button size="sm" variant="ghost" onClick={() => { setTxPageSize("all"); setTxPage(1); }}>전체 보기</Button>
+            </div>
           )}
         </Card>
       </div>

@@ -11,6 +11,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from app.models.activity import ActivityReport
+    from app.models.budget import BudgetCategory
     from app.models.member import Member
     from app.models.payment import PaymentRecord
 
@@ -40,6 +42,22 @@ class BankTransaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default="unmatched",
         nullable=False,
     )
+    budget_category_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("budget_categories.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    linked_activity_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("activity_reports.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    review_status: Mapped[str] = mapped_column(
+        String(50),
+        default="open",
+        nullable=False,
+    )
+    review_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     matched_member: Mapped[Member | None] = relationship(
         back_populates="bank_transactions"
@@ -52,4 +70,7 @@ class BankTransaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="refund_transaction",
         foreign_keys="[PaymentRecord.refund_transaction_id]",
     )
-
+    budget_category: Mapped[BudgetCategory | None] = relationship(
+        back_populates="transactions"
+    )
+    linked_activity: Mapped[ActivityReport | None] = relationship()

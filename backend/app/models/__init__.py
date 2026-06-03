@@ -6,6 +6,7 @@ from app.models.activity import (
 )
 from app.models.activity_feedback import ActivityFeedback
 from app.models.assistant_action import AssistantActionProposal
+from app.models.budget import BudgetCategory, BudgetPlan
 from app.models.file import UploadedFile
 from app.models.member import Member
 from app.models.notification import Notification
@@ -23,6 +24,8 @@ __all__ = [
     "AppSetting",
     "AssistantActionProposal",
     "BankTransaction",
+    "BudgetCategory",
+    "BudgetPlan",
     "Member",
     "Notification",
     "PaymentAdjustmentLog",

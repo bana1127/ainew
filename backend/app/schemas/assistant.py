@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from uuid import UUID
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -33,3 +35,27 @@ class AssistantExecuteResponse(BaseModel):
     activity_context: dict | None = None
     activity_candidates: list[dict] | None = None
     activity_draft: dict | None = None
+
+
+class AssistantChatContext(BaseModel):
+    page: str | None = None
+    activity_id: UUID | None = None
+    period: str | None = None
+
+
+class AssistantChatRequest(BaseModel):
+    message: str
+    context: AssistantChatContext | dict[str, Any] | None = None
+
+
+class AssistantChatLink(BaseModel):
+    label: str
+    url: str
+
+
+class AssistantChatResponse(BaseModel):
+    answer: str
+    intent: str
+    data_sources: list[str]
+    links: list[AssistantChatLink]
+    confidence: float

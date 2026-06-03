@@ -26,18 +26,58 @@ class ReceiptAnalysisPayload:
 
 
 _SYSTEM_PROMPT = """
-당신은 대학교 동아리 활동 보고서를 작성하는 전문가입니다.
-주어진 정보를 바탕으로 공식적인 한국어 활동 보고서를 작성해 주세요.
+당신은 대학교 동아리 활동 내역서를 작성하는 전문가입니다.
+주어진 정보를 바탕으로 실제 동아리 활동 내역서 문체에 맞는 간결한 한국어 활동 내용을 작성해 주세요.
+
+[내역서 문체 규칙]
+1. 활동 내용은 2~5문장으로 간결하게 작성한다.
+2. "~함", "~되었음", "시간을 가짐", "진행함" 중심의 사실 기록형 문체를 사용한다.
+3. 활동명, 활동일, 장소, 참여자 수, 활동 분류를 기반으로 자연스러운 내용을 생성한다.
+4. 과장된 성과, 장황한 목적 서술, 홍보성 문구를 쓰지 않는다.
+5. 반드시 제외: 회비, 활동비, 납부, 명단 등록, 명단 추가, 파일 생성, 매칭, 보고서 만들어줘 등 운영 지시 내용
+6. 사용자 요청 문장을 그대로 복사하지 말 것
+7. 활동 내용만 작성하고 "향후 계획" 같은 공문서 형식은 쓰지 않는다.
+
+[샘플 문체]
+회의: "위퍼퓸 정기 회의를 진행함. 동아리 운영 전반에 대한 논의와 향후 활동 계획을 점검함."
+멘토링: "이번 멘토링 활동에서는 향료와 향수들을 직접 맡아보며 다양한 종류의 향을 알아보는 시간을 가짐. 각자 맡아본 향을 기록하고, 자신만의 향수 취향을 공유하며 향수에 대한 이해도를 높였음."
+조향/체험: "A401호에서 교내 조향활동을 진행함. 참여자들이 향료와 향수에 대해 알아보고, 직접 시향하며 각자의 취향을 공유하는 시간을 가짐. 이를 통해 향에 대한 이해도를 높이고 동아리원 간의 교류를 도모할 수 있었음."
 
 다음 JSON 형식으로 응답하세요:
 {
   "title": "활동 보고서 제목",
-  "summary": "한 문장 요약",
-  "content": "전체 보고서 본문 (활동명, 활동 일시, 활동 장소, 참석자, 활동 목적, 주요 내용, 활동 결과, 향후 계획 포함)",
+  "summary": "한 문장 요약 (~함 문체)",
+  "content": "활동 내용 2~5문장 (사실 기록형, 운영 지시 제외)",
   "missing_fields": ["누락된 필드명 리스트"],
   "confidence": 0.85
 }
 """
+
+# Keywords indicating operational instructions (not activity content)
+_OPERATIONAL_KEYWORDS = [
+    "명단 등록", "명단 추가", "명단도", "활동비", "납부 대상", "납부대상", "회비",
+    "파일 생성", "hwpx", "보고서 만들어", "업로드", "매칭", "증빙", "영수증 처리",
+    "처리해줘", "완납", "미납", "처리해주세요", "만들어줘", "만들어주세요",
+    "추가해줘", "추가해주세요", "등록해줘", "등록해주세요", "생성해줘", "생성해주세요",
+]
+
+
+def _filter_operational_instructions(text: str | None) -> str:
+    """Remove operational instruction sentences from input text, keeping only activity content."""
+    if not text:
+        return ""
+    import re
+    sentences = re.split(r"(?<=[.!?。])\s+|(?<=[.!?。])\n|[.\n]", text)
+    result = []
+    for sentence in sentences:
+        s = sentence.strip()
+        if not s:
+            continue
+        lower_s = s.lower()
+        is_operational = any(kw in lower_s for kw in _OPERATIONAL_KEYWORDS)
+        if not is_operational:
+            result.append(s)
+    return " ".join(result).strip()
 
 
 class LLMService:
@@ -72,76 +112,65 @@ class LLMService:
             missing_fields.append("location")
         if not payload.participant_names:
             missing_fields.append("participant_names")
-        if not payload.input_text:
-            missing_fields.append("input_text")
+
+        base_title = payload.title or "활동"
+        category = payload.category_name or ""
+        location_str = payload.location or ""
+        participant_count = len(payload.participant_names)
 
         # Title
-        base_title = payload.title or "활동"
         if base_title.endswith(" 활동 보고서"):
             title = base_title
         else:
             title = base_title + " 활동 보고서"
 
-        # Summary
-        category = payload.category_name or "활동"
-        main_body = payload.input_text or payload.title or "활동"
-        summary = f"{category}을(를) 통해 {main_body}을(를) 진행하였다."
+        # Filter operational instructions from input
+        filtered_input = _filter_operational_instructions(payload.input_text)
 
-        # Content fields
-        date_str = payload.activity_date or "미정"
-        location_str = payload.location or "미정"
-        names_str = (
-            ", ".join(payload.participant_names)
-            if payload.participant_names
-            else "미정"
-        )
+        # Determine activity type for style selection
+        category_lower = category.lower()
+        title_lower = base_title.lower()
+        is_meeting = any(k in title_lower or k in category_lower for k in ["회의", "정기", "운영 회의", "임원"])
+        is_mentoring = any(k in title_lower or k in category_lower for k in ["멘토링", "스터디", "교육", "강의"])
+        is_external = any(k in title_lower or k in category_lower for k in ["협업", "외부", "협찬", "연합"])
 
-        # Purpose: derived from category and title
-        purpose_text = (
-            f"{category} 분야에서 '{base_title}' 활동을 진행하여 "
-            "부원들의 역량 강화 및 공동체 의식을 높이고자 하였습니다."
-        )
+        # Build concise 2~5 sentence content in 내역서 style
+        location_prefix = f"{location_str}에서 " if location_str else ""
+        count_suffix = f" 총 {participant_count}명이 참여함." if participant_count > 0 else ""
 
-        # Main content body
-        if payload.input_text:
-            main_content = payload.input_text
+        if is_meeting:
+            sentences = [
+                f"{base_title}을(를) 진행함.",
+                "동아리 운영 전반에 대한 논의와 향후 활동 계획을 점검함.",
+            ]
+            if count_suffix:
+                sentences.append(f"총 {participant_count}명이 참석하여 활발한 의견 교환이 이루어졌음.")
+        elif is_mentoring:
+            sentences = [
+                f"이번 {base_title}에서는 관련 내용을 직접 체험하며 알아보는 시간을 가짐.",
+                "참여자들이 각자의 경험과 의견을 공유하며 이해도를 높였음.",
+                f"이를 통해 동아리원 간의 교류를 도모할 수 있었음.",
+            ]
+        elif is_external:
+            sentences = [
+                f"외부 단체와의 협업 활동을 진행함.",
+                f"참여자들이 다양한 관점에서 활동을 경험하고, 서로의 의견을 나누는 시간을 가짐.",
+                f"이를 통해 동아리원들이 새로운 경험을 쌓고 교류를 강화할 수 있었음.",
+            ]
         else:
-            main_content = f"'{base_title}'에 관한 활동을 계획에 따라 진행하였습니다."
+            sentences = [
+                f"{location_prefix}{base_title}을(를) 진행함.",
+            ]
+            if filtered_input:
+                sentences.append(f"참여자들이 관련 활동에 참여하며 다양한 내용을 경험하는 시간을 가짐.")
+            sentences.append("이를 통해 동아리원 간의 교류를 도모하고 활동에 대한 이해도를 높였음.")
+            if count_suffix and participant_count > 0:
+                sentences.append(f"총 {participant_count}명이 참여함.")
 
-        if payload.reference_content:
-            main_content += (
-                f"\n\n[참고 자료 활용]\n다음 자료를 참고하여 활동을 진행하였습니다:\n{payload.reference_content}"
-            )
+        content = " ".join(sentences)
 
-        if payload.file_names:
-            files_str = ", ".join(payload.file_names)
-            main_content += f"\n\n[첨부 파일]\n{files_str}"
-
-        # Result
-        result_text = (
-            f"'{base_title}' 활동을 성공적으로 완료하였습니다. "
-            f"총 {len(payload.participant_names)}명의 부원이 참석하여 활동에 적극적으로 참여하였으며, "
-            "계획된 목표를 달성하였습니다."
-            if payload.participant_names
-            else f"'{base_title}' 활동을 완료하였으며 계획된 목표를 달성하였습니다."
-        )
-
-        # Future plan
-        future_text = (
-            f"향후 '{category}' 관련 활동을 지속적으로 기획하고, "
-            "이번 활동의 경험을 바탕으로 더욱 발전된 프로그램을 운영할 예정입니다."
-        )
-
-        content = (
-            f"활동명: {base_title}\n"
-            f"활동 일시: {date_str}\n"
-            f"활동 장소: {location_str}\n"
-            f"참석자: {names_str}\n\n"
-            f"활동 목적:\n{purpose_text}\n\n"
-            f"주요 내용:\n{main_content}\n\n"
-            f"활동 결과:\n{result_text}\n\n"
-            f"향후 계획:\n{future_text}"
-        )
+        # Summary (one sentence)
+        summary = f"{base_title}을(를) 진행하며 관련 활동에 참여함."
 
         return {
             "title": title,
@@ -157,22 +186,26 @@ class LLMService:
 
         client = openai.OpenAI(api_key=self.api_key)
 
+        # Filter operational instructions before sending to LLM
+        filtered_input = _filter_operational_instructions(payload.input_text)
+
         participant_names_str = (
-            ", ".join(payload.participant_names) if payload.participant_names else ""
+            f"{len(payload.participant_names)}명" if payload.participant_names else ""
         )
         file_names_str = (
             ", ".join(payload.file_names) if payload.file_names else ""
         )
 
         user_prompt_lines = [
-            "다음 정보를 바탕으로 활동 보고서를 작성해 주세요:",
+            "다음 정보를 바탕으로 실제 동아리 활동 내역서 문체(2~5문장, ~함/~되었음/시간을 가짐)로 작성해 주세요.",
+            "운영 지시(회비, 활동비, 명단 등록, 파일 생성 등)는 활동 내용에서 제외하세요.",
             "",
-            f"- 카테고리/분야: {payload.category_name or ''}",
+            f"- 활동 분류: {payload.category_name or ''}",
             f"- 활동 제목: {payload.title or ''}",
             f"- 활동 일자: {payload.activity_date or ''}",
             f"- 활동 장소: {payload.location or ''}",
-            f"- 참석자: {participant_names_str}",
-            f"- 활동 내용 요약 (입력): {payload.input_text or ''}",
+            f"- 참여 인원: {participant_names_str}",
+            f"- 활동 내용 (참고용): {filtered_input or ''}",
         ]
 
         if payload.reference_content:

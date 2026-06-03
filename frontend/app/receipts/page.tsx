@@ -575,7 +575,7 @@ export default function ReceiptsPage() {
                           style={{ color: "var(--text-muted)" }}>
                           {r.receipt_date ?? "-"}
                         </td>
-                        <td className="px-4 py-3 font-medium" style={{ color: "var(--text-main)" }}>
+                        <td className="px-4 py-3 font-medium max-w-[140px] truncate" title={r.store_name ?? ""} style={{ color: "var(--text-main)" }}>
                           {r.store_name ?? "-"}
                         </td>
                         <td className="px-4 py-3 text-right font-medium whitespace-nowrap"

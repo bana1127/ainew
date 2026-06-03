@@ -55,7 +55,7 @@ def _save_uploaded_file(file: UploadFile, db: Session) -> UploadedFile:
 @router.get("", response_model=list[BankTransactionRead])
 def list_transactions(
     skip: int = Query(default=0, ge=0),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=1000, ge=1, le=10000),
     match_status: str | None = None,
     payment_type: str | None = None,
     matched_member_id: UUID | None = None,

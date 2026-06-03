@@ -682,10 +682,27 @@ def _truncate_body_for_form(body: str, max_sentences: int = 4) -> str:
 
 
 def _split_report_body(body: str) -> list[str]:
-    """Split body into HWPX paragraph lines, limited to form-safe length."""
+    """Split body into HWPX paragraph lines, each sentence as a separate paragraph.
+
+    This ensures the HWPX form cell receives multiple paragraphs rather than
+    a single long text run, preventing content overlap in the submitted document.
+    """
     truncated = _truncate_body_for_form(body, max_sentences=4)
+    if not truncated:
+        return [body.strip()] if body.strip() else [""]
+
+    # First try explicit newlines (user-entered line breaks)
     lines = [line.strip() for line in re.split(r'\r?\n+', truncated) if line.strip()]
-    return lines or [truncated.strip()]
+    if len(lines) > 1:
+        return lines
+
+    # No newlines: split into sentences so each becomes its own paragraph
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?。])\s+', truncated) if s.strip()]
+    if len(sentences) > 1:
+        return sentences
+
+    # Single sentence or no boundary — return as-is
+    return [truncated.strip()]
 
 
 def _iter_tables(xml_text: str) -> list[tuple[int, int, str]]:

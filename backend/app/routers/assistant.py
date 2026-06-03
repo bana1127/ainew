@@ -26,10 +26,31 @@ from app.core.database import get_db
 from app.models.file import UploadedFile
 from app.routers.common import commit_or_400
 from app.agents.assistant_orchestrator import AssistantInput, AssistantOrchestrator
-from app.schemas.assistant import AssistantExecuteResponse
+from app.schemas.assistant import AssistantChatRequest, AssistantChatResponse, AssistantExecuteResponse
+from app.services.assistant_query_service import ASSISTANT_SUGGESTIONS, answer_floating_assistant_chat
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+@router.get("/chat/suggestions")
+def chat_suggestions() -> dict[str, list[str]]:
+    return {"suggestions": ASSISTANT_SUGGESTIONS}
+
+
+@router.post("/chat", response_model=AssistantChatResponse)
+def chat(
+    payload: AssistantChatRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    context_obj = payload.context
+    if hasattr(context_obj, "model_dump"):
+        context = context_obj.model_dump(mode="json")
+    elif isinstance(context_obj, dict):
+        context = context_obj
+    else:
+        context = None
+    return answer_floating_assistant_chat(db, message=payload.message, context=context)
 
 
 def _save_file(file: UploadFile, file_type: str, db: Session) -> tuple[UploadedFile, Path]:

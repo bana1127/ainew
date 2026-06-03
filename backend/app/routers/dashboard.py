@@ -1,10 +1,14 @@
-from fastapi import APIRouter, Depends
+import calendar
+from datetime import date
+
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models import (
     ActivityCategory,
+    ActivityParticipant,
     ActivityReport,
     BankTransaction,
     Member,
@@ -12,7 +16,9 @@ from app.models import (
     PaymentRecord,
     Receipt,
     ReferenceReport,
+    UploadedFile,
 )
+from app.services.membership_fee_management_service import get_membership_fee_summary
 
 
 router = APIRouter()
@@ -30,12 +36,13 @@ def dashboard_summary(db: Session = Depends(get_db)) -> dict:
     # IDs of non-deleted activities — used to filter activity-scoped records
     active_activity_ids_subq = select(ActivityReport.id).where(ActivityReport.deleted_at.is_(None))
 
-    # Unpaid activity fees: only from non-deleted activities
+    # Unpaid activity fees: only from non-deleted activities, exclude cancelled records
     unpaid_activity_fee = db.scalar(
         select(func.count(PaymentRecord.id)).where(
             and_(
                 PaymentRecord.payment_type == "activity_fee",
                 PaymentRecord.status == "unpaid",
+                PaymentRecord.status != "cancelled",
                 or_(
                     PaymentRecord.activity_report_id.is_(None),
                     PaymentRecord.activity_report_id.in_(active_activity_ids_subq),
@@ -44,15 +51,12 @@ def dashboard_summary(db: Session = Depends(get_db)) -> dict:
         )
     ) or 0
 
-    # Unpaid membership fees — includes partial and need_check alongside unpaid
-    unpaid_membership_fee = db.scalar(
-        select(func.count(PaymentRecord.id)).where(
-            and_(
-                PaymentRecord.payment_type == "membership_fee",
-                PaymentRecord.status.in_(["unpaid", "partial", "need_check"]),
-            )
-        )
-    ) or 0
+    membership_summary = get_membership_fee_summary(db, period=None)
+    unpaid_membership_fee = (
+        membership_summary.unpaid_count
+        + membership_summary.partial_count
+        + membership_summary.need_check_count
+    )
 
     return {
         "total_members": count_where(db, Member),
@@ -93,3 +97,191 @@ def dashboard_summary(db: Session = Depends(get_db)) -> dict:
         "unread_notifications": count_where(db, Notification, Notification.is_read.is_(False)),
     }
 
+
+@router.get("/calendar")
+def dashboard_calendar(
+    month: str = Query(default=None, description="YYYY-MM format, e.g. 2026-06"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return activity events for a given month.
+
+    month defaults to the current month if omitted.
+    Deleted activities are excluded.
+    Each event includes needs_report and needs_evidence flags.
+    """
+    today = date.today()
+    if month:
+        try:
+            year, mon = month.split("-")
+            target = date(int(year), int(mon), 1)
+        except (ValueError, AttributeError):
+            target = date(today.year, today.month, 1)
+    else:
+        target = date(today.year, today.month, 1)
+
+    _, last_day = calendar.monthrange(target.year, target.month)
+    month_start = date(target.year, target.month, 1)
+    month_end = date(target.year, target.month, last_day)
+
+    activities = list(db.scalars(
+        select(ActivityReport).where(
+            and_(
+                ActivityReport.deleted_at.is_(None),
+                ActivityReport.activity_date >= month_start,
+                ActivityReport.activity_date <= month_end,
+            )
+        ).order_by(ActivityReport.activity_date)
+    ))
+
+    # Batch-load receipt counts per activity
+    receipt_counts: dict = {}
+    participant_counts: dict = {}
+    fee_status_map: dict = {}
+    if activities:
+        act_ids = [a.id for a in activities]
+        receipt_rows = db.execute(
+            select(Receipt.activity_report_id, func.count(Receipt.id))
+            .where(Receipt.activity_report_id.in_(act_ids))
+            .group_by(Receipt.activity_report_id)
+        ).all()
+        receipt_counts = {str(r[0]): r[1] for r in receipt_rows}
+
+        part_rows = db.execute(
+            select(ActivityParticipant.activity_report_id, func.count(ActivityParticipant.id))
+            .where(ActivityParticipant.activity_report_id.in_(act_ids))
+            .group_by(ActivityParticipant.activity_report_id)
+        ).all()
+        participant_counts = {str(r[0]): r[1] for r in part_rows}
+
+        # Fee status: check if any non-cancelled unpaid records exist
+        fee_rows = db.execute(
+            select(PaymentRecord.activity_report_id, PaymentRecord.status)
+            .where(
+                and_(
+                    PaymentRecord.activity_report_id.in_(act_ids),
+                    PaymentRecord.payment_type == "activity_fee",
+                    PaymentRecord.status != "cancelled",
+                )
+            )
+        ).all()
+        fee_status_by_act: dict = {}
+        for row in fee_rows:
+            act_id_str = str(row[0])
+            statuses = fee_status_by_act.setdefault(act_id_str, set())
+            statuses.add(row[1])
+        for act_id_str, statuses in fee_status_by_act.items():
+            if "unpaid" in statuses or "partial" in statuses:
+                fee_status_map[act_id_str] = "unpaid"
+            elif "paid" in statuses:
+                fee_status_map[act_id_str] = "paid"
+            else:
+                fee_status_map[act_id_str] = "none"
+
+    events = []
+    for act in activities:
+        has_report = bool(act.final_content or act.generated_content)
+        has_evidence = receipt_counts.get(str(act.id), 0) > 0
+        act_id_str = str(act.id)
+        events.append({
+            "id": act_id_str,
+            "type": "activity",
+            "title": act.title or "(제목 없음)",
+            "date": str(act.activity_date),
+            "location": act.location or "",
+            "status": act.status or "planned",
+            "needs_report": not has_report,
+            "needs_evidence": not has_evidence,
+            "participant_count": participant_counts.get(act_id_str, 0),
+            "fee_status": fee_status_map.get(act_id_str, "none"),
+            "url": f"/activities/{act.id}",
+        })
+
+    return {
+        "month": f"{target.year}-{target.month:02d}",
+        "events": events,
+    }
+
+
+@router.get("/todo")
+def dashboard_todo(db: Session = Depends(get_db)) -> dict:
+    """Return actionable items for the dashboard todo list.
+
+    Includes:
+    - Unpaid membership fee count
+    - Unpaid activity fee count
+    - Activities without report body
+    - Activities without receipts
+    - Activities without HWPX generated document
+    """
+    active_activity_ids_subq = select(ActivityReport.id).where(ActivityReport.deleted_at.is_(None))
+
+    membership_summary = get_membership_fee_summary(db, period=None)
+    unpaid_membership_fee = (
+        membership_summary.unpaid_count
+        + membership_summary.partial_count
+        + membership_summary.need_check_count
+    )
+
+    unpaid_activity_fee = db.scalar(
+        select(func.count(PaymentRecord.id)).where(
+            and_(
+                PaymentRecord.payment_type == "activity_fee",
+                PaymentRecord.status == "unpaid",
+                PaymentRecord.status != "cancelled",
+                or_(
+                    PaymentRecord.activity_report_id.is_(None),
+                    PaymentRecord.activity_report_id.in_(active_activity_ids_subq),
+                ),
+            )
+        )
+    ) or 0
+
+    # Activities without any report body (final_content or generated_content)
+    no_report_activities = db.scalar(
+        select(func.count(ActivityReport.id)).where(
+            and_(
+                ActivityReport.deleted_at.is_(None),
+                ActivityReport.final_content.is_(None),
+                ActivityReport.generated_content.is_(None),
+            )
+        )
+    ) or 0
+
+    # Activities without any linked receipts
+    acts_with_receipts_subq = select(Receipt.activity_report_id).where(
+        Receipt.activity_report_id.isnot(None)
+    ).distinct()
+    no_evidence_activities = db.scalar(
+        select(func.count(ActivityReport.id)).where(
+            and_(
+                ActivityReport.deleted_at.is_(None),
+                ActivityReport.id.notin_(acts_with_receipts_subq),
+            )
+        )
+    ) or 0
+
+    # Activities without HWPX generated document
+    acts_with_hwpx_subq = select(UploadedFile.activity_report_id).where(
+        and_(
+            UploadedFile.activity_report_id.isnot(None),
+            UploadedFile.file_ext == "hwpx",
+            UploadedFile.file_role == "generated",
+            UploadedFile.deleted_at.is_(None),
+        )
+    ).distinct()
+    no_hwpx_activities = db.scalar(
+        select(func.count(ActivityReport.id)).where(
+            and_(
+                ActivityReport.deleted_at.is_(None),
+                ActivityReport.id.notin_(acts_with_hwpx_subq),
+            )
+        )
+    ) or 0
+
+    return {
+        "unpaid_membership_fee": unpaid_membership_fee,
+        "unpaid_activity_fee": unpaid_activity_fee,
+        "no_report_activities": no_report_activities,
+        "no_evidence_activities": no_evidence_activities,
+        "no_hwpx_activities": no_hwpx_activities,
+    }

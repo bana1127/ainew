@@ -15,7 +15,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
-from app.models import ActivityCategory, ActivityParticipant, ActivityReport, Member
+from app.models import ActivityCategory, ActivityParticipant, ActivityReport, BankTransaction, Member
 from app.models.file import UploadedFile
 from app.models.payment import PaymentRecord
 from app.models.receipt import Receipt
@@ -220,7 +220,7 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
     has_receipts = len(receipts) > 0
     receipts_ok = all(r.evidence_status == "valid" for r in receipts) if receipts else True
 
-    # File vault: count submission files
+    # File vault: count submission files + HWPX generated
     file_count = db.scalar(
         select(func.count(UploadedFile.id)).where(
             and_(
@@ -238,10 +238,21 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
             )
         )
     ) or 0
+    hwpx_count = db.scalar(
+        select(func.count(UploadedFile.id)).where(
+            and_(
+                UploadedFile.activity_report_id == activity_id,
+                UploadedFile.file_ext == "hwpx",
+                UploadedFile.file_role == "generated",
+                UploadedFile.deleted_at.is_(None),
+            )
+        )
+    ) or 0
 
     checklist = [
         {"key": "participants", "label": "참여자 등록", "done": has_participants, "count": len(participants)},
         {"key": "report", "label": "보고서 작성", "done": has_report},
+        {"key": "hwpx_generated", "label": "HWPX 문서 생성", "done": hwpx_count > 0, "count": hwpx_count},
         {"key": "activity_fee_setup", "label": "활동비 설정", "done": has_fee},
         {"key": "activity_fee_paid", "label": "활동비 납부 완료", "done": fee_paid,
          "detail": f"{paid_count}/{len(fee_records)}" if fee_records else None},
@@ -349,6 +360,36 @@ def archive_activity(
     report.deleted_at = datetime.now(timezone.utc)
     if report.status != "archived":
         report.status = "archived"
+
+    # Cancel activity_fee records and unmatch linked bank transactions
+    fee_records = list(db.scalars(
+        select(PaymentRecord).where(
+            and_(
+                PaymentRecord.activity_report_id == activity_id,
+                PaymentRecord.payment_type == "activity_fee",
+            )
+        )
+    ))
+    for rec in fee_records:
+        if rec.status != "cancelled":
+            rec.status = "cancelled"
+            if (rec.paid_amount or 0) > 0:
+                rec.refund_status = "refund_required"
+        # Unmatch the linked bank transaction so it can be re-matched later
+        if rec.transaction_id:
+            txn = db.get(BankTransaction, rec.transaction_id)
+            if txn:
+                txn.match_status = "unmatched"
+                txn.matched_member_id = None
+                txn.payment_type = None
+            rec.transaction_id = None
+
+    # Clear linked_activity_id from any transactions directly linked to this activity
+    for txn in db.scalars(
+        select(BankTransaction).where(BankTransaction.linked_activity_id == activity_id)
+    ):
+        txn.linked_activity_id = None
+
     commit_or_400(db, "Could not delete activity")
     db.refresh(report)
     return _activity_summary(report, db)
@@ -388,6 +429,31 @@ def add_participant(
         role=payload.role,
     )
     db.add(participant)
+
+    # Restore cancelled activity_fee record if one exists (re-added participant)
+    period_key = f"act-{str(activity_id)[:8]}"
+    cancelled_fee = db.execute(
+        select(PaymentRecord).where(
+            and_(
+                PaymentRecord.member_id == payload.member_id,
+                PaymentRecord.period == period_key,
+                PaymentRecord.payment_type == "activity_fee",
+                PaymentRecord.activity_report_id == activity_id,
+                PaymentRecord.status == "cancelled",
+            )
+        )
+    ).scalar_one_or_none()
+    if cancelled_fee:
+        paid = cancelled_fee.paid_amount or 0
+        required = cancelled_fee.required_amount or 0
+        if paid >= required and paid > 0:
+            cancelled_fee.status = "paid" if paid == required else "overpaid"
+        elif paid > 0:
+            cancelled_fee.status = "partial"
+        else:
+            cancelled_fee.status = "unpaid"
+        cancelled_fee.refund_status = None
+
     commit_or_400(db, "Could not add participant")
     db.refresh(participant)
 
@@ -399,6 +465,7 @@ def add_participant(
         "student_id": member.student_id if member else None,
         "department": member.department if member else None,
         "role": participant.role,
+        "fee_record_restored": cancelled_fee is not None,
     }
 
 
@@ -420,8 +487,28 @@ def remove_participant(
     if not participant:
         raise HTTPException(status_code=404, detail="Participant not found")
     db.delete(participant)
+
+    # Sync activity_fee PaymentRecord: cancel and flag for refund if paid
+    period_key = f"act-{str(activity_id)[:8]}"
+    fee_record = db.execute(
+        select(PaymentRecord).where(
+            and_(
+                PaymentRecord.member_id == member_id,
+                PaymentRecord.period == period_key,
+                PaymentRecord.payment_type == "activity_fee",
+                PaymentRecord.activity_report_id == activity_id,
+            )
+        )
+    ).scalar_one_or_none()
+    fee_cancelled = False
+    if fee_record and fee_record.status != "cancelled":
+        fee_record.status = "cancelled"
+        if (fee_record.paid_amount or 0) > 0:
+            fee_record.refund_status = "refund_required"
+        fee_cancelled = True
+
     commit_or_400(db, "Could not remove participant")
-    return {"ok": True}
+    return {"ok": True, "fee_record_cancelled": fee_cancelled}
 
 
 # ─── Participant Import (Task 27) ──────────────────────────────────────────────
@@ -626,8 +713,17 @@ def generate_activity_fees(
         if existing:
             # Always update required_amount so amount change is reflected everywhere
             existing.required_amount = payload.fee_amount
-            # Recalculate status unless exempt/cancelled/need_check (manual states)
-            if existing.status not in ("exempt", "cancelled", "need_check"):
+            if existing.status == "cancelled":
+                # Participant was re-added; restore status from paid amounts
+                paid = existing.paid_amount or 0
+                if paid >= payload.fee_amount:
+                    existing.status = "paid" if paid == payload.fee_amount else "overpaid"
+                elif paid > 0:
+                    existing.status = "partial"
+                else:
+                    existing.status = "unpaid"
+                existing.refund_status = None
+            elif existing.status not in ("exempt", "need_check"):
                 if existing.paid_amount >= payload.fee_amount:
                     existing.status = "paid" if existing.paid_amount == payload.fee_amount else "overpaid"
                 elif existing.paid_amount > 0:
@@ -1471,3 +1567,41 @@ def list_excluded_transactions(
             } if txn else None,
         })
     return result
+
+
+# ─── Audit Checklist (Task 34) ────────────────────────────────────────────────
+
+@router.get("/{activity_id}/audit-checklist")
+def get_audit_checklist(
+    activity_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return a detailed audit readiness checklist for the activity."""
+    from app.services.activity_audit_check_service import compute_audit_checklist
+
+    _get_active_activity_or_404(db, activity_id)
+
+    try:
+        result = compute_audit_checklist(db, activity_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return {
+        "activity_id": result.activity_id,
+        "activity_title": result.activity_title,
+        "total_done": result.total_done,
+        "total_items": result.total_items,
+        "ready_for_audit": result.ready_for_audit,
+        "items": [
+            {
+                "key": item.key,
+                "label": item.label,
+                "done": item.done,
+                "detail": item.detail,
+                "count": item.count,
+                "warning": item.warning,
+            }
+            for item in result.items
+        ],
+    }
+

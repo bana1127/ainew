@@ -70,6 +70,8 @@ class PaymentRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     fee_rule_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     joined_term: Mapped[str | None] = mapped_column(String(50), nullable=True)
     current_term: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    payment_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    manual_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     member: Mapped[Member] = relationship(back_populates="payment_records")
     transaction: Mapped[BankTransaction | None] = relationship(

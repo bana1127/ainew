@@ -10,6 +10,7 @@ from app.routers import (
     agents,
     assistant,
     automations,
+    budget,
     dashboard,
     document_templates,
     files,
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
+    app.include_router(budget.router, prefix="/api/budget", tags=["budget"])
     app.include_router(activities.router, prefix="/api/activities", tags=["activities"])
     app.include_router(
         activity_form_imports.router,

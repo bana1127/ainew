@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
@@ -29,6 +30,12 @@ from app.schemas.membership_fee import (
     MembershipFeePreviewSummary,
 )
 from app.services.membership_fee_policy import preview_membership_fee_generation
+from app.services.membership_fee_management_service import (
+    apply_membership_record_manual_update,
+    confirm_sync_targets,
+    get_membership_fee_summary,
+    preview_sync_targets,
+)
 from app.services.payment_matching_service import (
     MemberSummary,
     PaymentMatchingPreview,
@@ -39,6 +46,35 @@ from app.services.payment_matching_service import (
 )
 
 router = APIRouter()
+
+
+class MembershipSyncTargetsPayload(BaseModel):
+    period: str | None = None
+    new_member_fee: int = 15000
+    existing_member_fee: int = 10000
+    executive_fee: int = 0
+
+
+class MembershipSyncConfirmPayload(BaseModel):
+    action_id: UUID
+
+
+class MembershipBulkUpdateAliasPayload(BaseModel):
+    period: str
+    payment_record_ids: list[str]
+    operation: str
+    paid_amount_value: int | None = None
+
+
+class MembershipBulkUpdateAliasConfirmPayload(BaseModel):
+    action_id: UUID
+
+
+class MembershipManualPatchPayload(BaseModel):
+    required_amount: int | None = None
+    paid_amount: int | None = None
+    status: str | None = None
+    manual_note: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +203,25 @@ def _membership_fee_preview_to_schema(preview, action_id: str | None = None) -> 
     )
 
 
+def _membership_summary_to_schema(summary) -> PaymentSummaryResponse:
+    return PaymentSummaryResponse(
+        period=summary.period,
+        payment_type=summary.payment_type,
+        required_amount=summary.required_amount,
+        total_members=summary.total_members,
+        paid_count=summary.paid_count,
+        partial_count=summary.partial_count,
+        unpaid_count=summary.unpaid_count,
+        need_check_count=summary.need_check_count,
+        exempt_count=summary.exempt_count,
+        overpaid_count=summary.overpaid_count,
+        missing_record_count=summary.missing_record_count,
+        receivable_amount=summary.receivable_amount,
+        total_required_amount=summary.total_required_amount,
+        total_paid_amount=summary.total_paid_amount,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -247,6 +302,132 @@ def membership_fee_preview(
     return _membership_fee_preview_to_schema(preview, str(proposal.id))
 
 
+@router.post("/membership/sync-targets-preview", response_model=MembershipFeePreviewResponse)
+def membership_sync_targets_preview(
+    payload: MembershipSyncTargetsPayload,
+    db: Session = Depends(get_db),
+) -> MembershipFeePreviewResponse:
+    result = preview_sync_targets(
+        db=db,
+        period=payload.period,
+        new_member_fee=payload.new_member_fee,
+        existing_member_fee=payload.existing_member_fee,
+        executive_fee=payload.executive_fee,
+    )
+    return _membership_fee_preview_to_schema(result["preview"], result["action_id"])
+
+
+@router.post("/membership/sync-targets-confirm")
+def membership_sync_targets_confirm(
+    payload: MembershipSyncConfirmPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return confirm_sync_targets(db, action_id=payload.action_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/membership/summary", response_model=PaymentSummaryResponse)
+def get_membership_summary(
+    period: str = Query(...),
+    db: Session = Depends(get_db),
+) -> PaymentSummaryResponse:
+    return _membership_summary_to_schema(
+        get_membership_fee_summary(db, period=period)
+    )
+
+
+@router.get("/membership/history")
+def get_membership_history(
+    period: str = Query(...),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    from app.models.payment import PaymentAdjustmentLog
+
+    rows = db.execute(
+        select(PaymentAdjustmentLog, PaymentRecord, Member)
+        .join(PaymentRecord, PaymentAdjustmentLog.payment_record_id == PaymentRecord.id)
+        .join(Member, PaymentRecord.member_id == Member.id)
+        .where(
+            and_(
+                PaymentRecord.payment_type == "membership_fee",
+                PaymentRecord.period == period,
+            )
+        )
+        .order_by(PaymentAdjustmentLog.created_at.desc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": str(log.id),
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+            "payment_record_id": str(record.id),
+            "member_id": str(member.id),
+            "member_name": member.name,
+            "student_id": member.student_id,
+            "action": log.action,
+            "previous_status": log.previous_status,
+            "new_status": log.new_status,
+            "previous_paid_amount": log.previous_paid_amount,
+            "new_paid_amount": log.new_paid_amount,
+            "payment_source": getattr(record, "payment_source", None),
+            "manual_note": getattr(record, "manual_note", None),
+            "reason": log.reason,
+        }
+        for log, record, member in rows
+    ]
+
+
+@router.post("/membership/bulk-update-preview")
+def membership_bulk_update_preview_alias(
+    payload: MembershipBulkUpdateAliasPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.routers.payment_records import membership_bulk_update_preview as _preview
+    from app.routers.payment_records import MembershipBulkUpdatePreviewPayload
+
+    return _preview(
+        MembershipBulkUpdatePreviewPayload(**payload.model_dump()),
+        db=db,
+    )
+
+
+@router.post("/membership/bulk-update-confirm")
+def membership_bulk_update_confirm_alias(
+    payload: MembershipBulkUpdateAliasConfirmPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.routers.payment_records import membership_bulk_update_confirm as _confirm
+    from app.routers.payment_records import MembershipBulkUpdateConfirmPayload
+
+    return _confirm(
+        MembershipBulkUpdateConfirmPayload(action_id=str(payload.action_id)),
+        db=db,
+    )
+
+
+@router.patch("/membership/{payment_record_id}", response_model=PaymentRecordRead)
+def patch_membership_payment_record(
+    payment_record_id: UUID,
+    payload: MembershipManualPatchPayload,
+    db: Session = Depends(get_db),
+) -> PaymentRecordRead:
+    try:
+        record = apply_membership_record_manual_update(
+            db,
+            payment_record_id=payment_record_id,
+            required_amount=payload.required_amount,
+            paid_amount=payload.paid_amount,
+            status=payload.status,
+            manual_note=payload.manual_note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return PaymentRecordRead.model_validate(record)
+
+
 @router.patch("/transactions/{transaction_id}/confirm", response_model=PaymentRecordRead)
 def confirm_transaction(
     transaction_id: UUID,
@@ -303,6 +484,7 @@ def confirm_transaction(
         existing.paid_amount = transaction.deposit_amount
         existing.status = payload.status
         existing.transaction_id = transaction.id
+        existing.payment_source = "transaction_match"
         record = existing
     else:
         record = PaymentRecord(
@@ -313,6 +495,7 @@ def confirm_transaction(
             paid_amount=transaction.deposit_amount,
             status=payload.status,
             transaction_id=transaction.id,
+            payment_source="transaction_match",
         )
         db.add(record)
 
@@ -350,24 +533,8 @@ def get_payment_summary(
     db: Session = Depends(get_db),
 ) -> PaymentSummaryResponse:
     if payment_type == "membership_fee":
-        preview = preview_membership_fee_generation(db=db, period=period)
-        paid_count = sum(1 for row in preview.rows if row.status == "paid")
-        partial_count = sum(1 for row in preview.rows if row.status == "partial")
-        unpaid_count = sum(1 for row in preview.rows if row.status == "unpaid")
-        need_check_count = sum(1 for row in preview.rows if row.status == "need_check")
-        exempt_count = sum(1 for row in preview.rows if row.status == "exempt")
-        return PaymentSummaryResponse(
-            period=preview.current_term,
-            payment_type=payment_type,
-            required_amount=preview.new_member_fee,
-            total_members=preview.summary.total_members,
-            paid_count=paid_count,
-            partial_count=partial_count,
-            unpaid_count=unpaid_count,
-            need_check_count=need_check_count,
-            exempt_count=exempt_count,
-            total_required_amount=preview.summary.total_required_amount,
-            total_paid_amount=preview.summary.total_paid_amount,
+        return _membership_summary_to_schema(
+            get_membership_fee_summary(db, period=period)
         )
 
     # Get required_amount from app_settings (no fixed default)
@@ -451,7 +618,7 @@ def get_unpaid_members(
                 payment_record_id=row.existing_record_id,
             )
             for row in preview.rows
-            if row.status in ("unpaid", "need_check")
+            if row.status in ("unpaid", "partial", "need_check")
         ]
 
     # Get required_amount from app_settings (no fixed default)

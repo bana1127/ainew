@@ -24,6 +24,42 @@ export type DashboardSummary = {
   unread_notifications: number;
 };
 
+export type CalendarEvent = {
+  id: string;
+  type: string;
+  title: string;
+  date: string;
+  location: string;
+  status: string;
+  needs_report: boolean;
+  needs_evidence: boolean;
+  participant_count?: number;
+  fee_status?: string;
+  url: string;
+};
+
+export type DashboardCalendar = {
+  month: string;
+  events: CalendarEvent[];
+};
+
+export type DashboardTodo = {
+  unpaid_membership_fee: number;
+  unpaid_activity_fee: number;
+  no_report_activities: number;
+  no_evidence_activities: number;
+  no_hwpx_activities: number;
+};
+
+export async function getDashboardCalendar(month?: string): Promise<DashboardCalendar> {
+  const qs = month ? `?month=${month}` : "";
+  return apiFetch<DashboardCalendar>(`/api/dashboard/calendar${qs}`);
+}
+
+export async function getDashboardTodo(): Promise<DashboardTodo> {
+  return apiFetch<DashboardTodo>("/api/dashboard/todo");
+}
+
 export type ApiRecord = Record<string, unknown> & {
   id?: string;
   key?: string;
@@ -442,6 +478,10 @@ export type BankTransaction = {
   match_status: string;
   payment_type: string | null;
   matched_member_id: string | null;
+  budget_category_id?: string | null;
+  linked_activity_id?: string | null;
+  review_status?: string | null;
+  review_note?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -535,6 +575,245 @@ export async function getTransactionsTyped(
   return apiFetch<BankTransaction[]>(`/api/transactions${buildQuery(p)}`);
 }
 
+// ─── Budget management (Task 38) ─────────────────────────────────────────────
+
+export type BudgetSummary = {
+  current_balance: number;
+  total_income: number;
+  total_expense: number;
+  net_change: number;
+  receivable_amount: number;
+  refund_scheduled_amount: number;
+  review_transaction_count: number;
+  missing_evidence_count: number;
+  period: string | null;
+  start_date: string | null;
+  end_date: string | null;
+};
+
+export type BudgetCashflowRow = {
+  bucket: string;
+  income: number;
+  expense: number;
+  net: number;
+};
+
+export type BudgetCategory = {
+  id: string;
+  name: string;
+  type: "income" | "expense";
+  parent_id: string | null;
+  sort_order: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BudgetPlan = {
+  id: string;
+  period: string;
+  category_id: string;
+  planned_amount: number;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BudgetVsActualRow = {
+  category_id: string;
+  category_name: string;
+  type: "income" | "expense";
+  is_active: boolean;
+  planned_amount: number;
+  actual_amount: number;
+  difference_amount: number;
+  over_budget: boolean;
+  note: string | null;
+};
+
+export type BudgetReviewItem = {
+  id: string;
+  type: string;
+  label: string;
+  title: string | null;
+  amount: number;
+  status: string | null;
+  target_url: string;
+  severity: "danger" | "warning" | "info" | string;
+  source_id: string;
+};
+
+export type BudgetActivitySettlement = {
+  activity_id: string;
+  activity_title: string;
+  activity_date: string | null;
+  participant_count: number;
+  expected_income: number;
+  actual_income: number;
+  expense_amount: number;
+  balance_amount: number;
+  evidence_status: string;
+  report_status: string;
+  target_url: string;
+  activity_fee_url: string;
+  evidence_url: string;
+  files_url: string;
+  audit_package_url: string;
+};
+
+export type BudgetTransactionClassifyPreview = {
+  ok: boolean;
+  requires_confirmation: boolean;
+  auto_apply: boolean;
+  action_id: string;
+  transaction_id: string;
+  before: Record<string, string | null>;
+  after: Record<string, string | null>;
+};
+
+function budgetQuery(params?: {
+  period?: string;
+  start_date?: string;
+  end_date?: string;
+  include_inactive?: boolean;
+}) {
+  const p: Record<string, string | undefined> = {};
+  if (params?.period) p.period = params.period;
+  if (params?.start_date) p.start_date = params.start_date;
+  if (params?.end_date) p.end_date = params.end_date;
+  if (params?.include_inactive !== undefined) p.include_inactive = String(params.include_inactive);
+  return buildQuery(p);
+}
+
+export async function getBudgetSummary(params?: {
+  period?: string;
+  start_date?: string;
+  end_date?: string;
+}): Promise<BudgetSummary> {
+  return apiFetch<BudgetSummary>(`/api/budget/summary${budgetQuery(params)}`);
+}
+
+export async function getBudgetCashflow(params?: {
+  start_date?: string;
+  end_date?: string;
+}): Promise<BudgetCashflowRow[]> {
+  return apiFetch<BudgetCashflowRow[]>(`/api/budget/cashflow${budgetQuery(params)}`);
+}
+
+export async function getBudgetCategories(params?: {
+  include_inactive?: boolean;
+}): Promise<BudgetCategory[]> {
+  return apiFetch<BudgetCategory[]>(`/api/budget/categories${budgetQuery(params)}`);
+}
+
+export async function createBudgetCategory(payload: {
+  name: string;
+  type: "income" | "expense";
+  parent_id?: string | null;
+  sort_order?: number;
+  is_active?: boolean;
+}): Promise<BudgetCategory> {
+  return apiFetch<BudgetCategory>("/api/budget/categories", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateBudgetCategory(
+  id: string,
+  payload: Partial<Pick<BudgetCategory, "name" | "type" | "parent_id" | "sort_order" | "is_active">>,
+): Promise<BudgetCategory> {
+  return apiFetch<BudgetCategory>(`/api/budget/categories/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getBudgetPlans(period?: string): Promise<BudgetPlan[]> {
+  return apiFetch<BudgetPlan[]>(`/api/budget/plans${budgetQuery({ period })}`);
+}
+
+export async function saveBudgetPlan(payload: {
+  period: string;
+  category_id: string;
+  planned_amount: number;
+  note?: string | null;
+}): Promise<BudgetPlan> {
+  return apiFetch<BudgetPlan>("/api/budget/plans", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateBudgetPlan(
+  id: string,
+  payload: Partial<Pick<BudgetPlan, "period" | "category_id" | "planned_amount" | "note">>,
+): Promise<BudgetPlan> {
+  return apiFetch<BudgetPlan>(`/api/budget/plans/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getBudgetVsActual(params: {
+  period: string;
+  start_date?: string;
+  end_date?: string;
+}): Promise<BudgetVsActualRow[]> {
+  return apiFetch<BudgetVsActualRow[]>(`/api/budget/budget-vs-actual${budgetQuery(params)}`);
+}
+
+export async function getBudgetActivitySettlements(params?: {
+  start_date?: string;
+  end_date?: string;
+}): Promise<BudgetActivitySettlement[]> {
+  return apiFetch<BudgetActivitySettlement[]>(`/api/budget/activity-settlements${budgetQuery(params)}`);
+}
+
+export async function getBudgetReviewItems(params?: {
+  period?: string;
+  start_date?: string;
+  end_date?: string;
+}): Promise<BudgetReviewItem[]> {
+  return apiFetch<BudgetReviewItem[]>(`/api/budget/review-items${budgetQuery(params)}`);
+}
+
+export async function resolveBudgetReviewItem(
+  itemId: string,
+  note?: string,
+): Promise<{ ok: boolean; id: string; status: string }> {
+  return apiFetch(`/api/budget/review-items/${encodeURIComponent(itemId)}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ note: note ?? null }),
+  });
+}
+
+export async function previewBudgetTransactionClassify(
+  transactionId: string,
+  payload: {
+    payment_type?: string | null;
+    budget_category_id?: string | null;
+    linked_activity_id?: string | null;
+    match_status?: string | null;
+    review_status?: string | null;
+    review_note?: string | null;
+  },
+): Promise<BudgetTransactionClassifyPreview> {
+  return apiFetch<BudgetTransactionClassifyPreview>(
+    `/api/budget/transactions/${transactionId}/classify-preview`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export async function confirmBudgetTransactionClassify(
+  actionId: string,
+): Promise<Record<string, unknown>> {
+  return apiFetch<Record<string, unknown>>("/api/budget/transactions/classify-confirm", {
+    method: "POST",
+    body: JSON.stringify({ action_id: actionId }),
+  });
+}
+
 // ═══════════════════════════════════════════════════════════
 // Task 6: Payment matching types and API functions
 // ═══════════════════════════════════════════════════════════
@@ -623,6 +902,9 @@ export type PaymentSummary = {
   unpaid_count: number;
   need_check_count: number;
   exempt_count?: number;
+  overpaid_count?: number;
+  missing_record_count?: number;
+  receivable_amount?: number;
   total_required_amount: number;
   total_paid_amount: number;
 };
@@ -647,8 +929,27 @@ export type PaymentRecord = {
   fee_rule_reason?: string | null;
   joined_term?: string | null;
   current_term?: string | null;
+  payment_source?: "transaction_match" | "manual" | "imported" | string | null;
+  manual_note?: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type MembershipPaymentHistoryItem = {
+  id: string;
+  created_at: string | null;
+  payment_record_id: string;
+  member_id: string;
+  member_name: string;
+  student_id: string | null;
+  action: string;
+  previous_status: string | null;
+  new_status: string | null;
+  previous_paid_amount: number | null;
+  new_paid_amount: number | null;
+  payment_source: string | null;
+  manual_note: string | null;
+  reason: string | null;
 };
 
 export type MembershipFeePreviewPayload = {
@@ -756,6 +1057,24 @@ export async function getPaymentSummary(params: {
   );
 }
 
+export async function getMembershipSummary(period: string): Promise<PaymentSummary> {
+  return apiFetch<PaymentSummary>(
+    `/api/payments/membership/summary${buildQuery({ period })}`,
+  );
+}
+
+export async function getMembershipHistory(params: {
+  period: string;
+  limit?: number;
+}): Promise<MembershipPaymentHistoryItem[]> {
+  return apiFetch<MembershipPaymentHistoryItem[]>(
+    `/api/payments/membership/history${buildQuery({
+      period: params.period,
+      limit: params.limit !== undefined ? String(params.limit) : undefined,
+    })}`,
+  );
+}
+
 export async function getUnpaidPayments(params: {
   period: string;
   payment_type?: string;
@@ -782,7 +1101,8 @@ export type ManualPaymentRecordPayload = {
   payment_type: string;
   required_amount: number;
   paid_amount: number;
-  status?: "unpaid" | "paid" | "partial" | "need_check" | "exempt";
+  status?: "unpaid" | "paid" | "partial" | "overpaid" | "need_check" | "exempt";
+  manual_note?: string | null;
 };
 
 export async function updatePaymentRecord(
@@ -802,6 +1122,109 @@ export async function upsertManualPaymentRecord(
     method: "PUT",
     body: JSON.stringify(payload),
   });
+}
+
+export async function patchMembershipPaymentRecord(
+  id: string,
+  payload: {
+    required_amount?: number | null;
+    paid_amount?: number | null;
+    status?: string | null;
+    manual_note?: string | null;
+  },
+): Promise<PaymentRecord> {
+  return apiFetch<PaymentRecord>(`/api/payments/membership/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function previewMembershipSyncTargets(
+  payload: MembershipFeePreviewPayload,
+): Promise<MembershipFeePreview> {
+  return apiFetch<MembershipFeePreview>("/api/payments/membership/sync-targets-preview", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function confirmMembershipSyncTargets(
+  actionId: string,
+): Promise<Record<string, unknown>> {
+  return apiFetch<Record<string, unknown>>("/api/payments/membership/sync-targets-confirm", {
+    method: "POST",
+    body: JSON.stringify({ action_id: actionId }),
+  });
+}
+
+// ─── Membership fee bulk update (Task 37) ────────────────────────────────────
+
+export type MembershipBulkUpdateRow = {
+  payment_record_id: string;
+  member_id: string | null;
+  member_name: string | null;
+  student_id: string | null;
+  before_required_amount: number;
+  before_paid_amount: number;
+  before_status: string;
+  after_required_amount: number;
+  after_paid_amount: number;
+  after_status: string;
+  will_change: boolean;
+  note: string | null;
+};
+
+export type MembershipBulkUpdateSummary = {
+  selected: number;
+  will_change: number;
+  no_change: number;
+  will_be_paid: number;
+  will_be_exempt: number;
+  will_be_unpaid: number;
+  will_be_need_check: number;
+  danger: boolean;
+  danger_reason: string | null;
+};
+
+export type MembershipBulkUpdatePreviewResult = {
+  ok: boolean;
+  requires_confirmation: boolean;
+  auto_apply: boolean;
+  action_id: string;
+  operation: string;
+  period: string;
+  summary: MembershipBulkUpdateSummary;
+  rows: MembershipBulkUpdateRow[];
+};
+
+export type MembershipBulkUpdateConfirmResult = {
+  ok: boolean;
+  operation: string;
+  period: string;
+  updated_count: number;
+  skipped_count: number;
+  rows_updated: string[];
+};
+
+export async function previewMembershipBulkUpdate(payload: {
+  period: string;
+  payment_record_ids: string[];
+  operation: string;
+  paid_amount_value?: number | null;
+}): Promise<MembershipBulkUpdatePreviewResult> {
+  return apiFetch<MembershipBulkUpdatePreviewResult>(
+    "/api/payment-records/membership/bulk-preview",
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export async function confirmMembershipBulkUpdate(
+  actionId: string,
+): Promise<MembershipBulkUpdateConfirmResult> {
+  return apiFetch<MembershipBulkUpdateConfirmResult>(
+    "/api/payment-records/membership/bulk-confirm",
+    { method: "POST", body: JSON.stringify({ action_id: actionId }) },
+  );
 }
 
 export async function previewMembershipFees(
@@ -1055,6 +1478,54 @@ export type AssistantActionApplyResult = {
   activity_id: string | null;
   result?: Record<string, unknown>;
 };
+
+export type AssistantChatContext = {
+  page?: string | null;
+  activity_id?: string | null;
+  period?: string | null;
+};
+
+export type AssistantChatLink = {
+  label: string;
+  url: string;
+};
+
+export type AssistantChatResponse = {
+  answer: string;
+  intent:
+    | "member_count"
+    | "activity_count"
+    | "activity_participant_count"
+    | "membership_fee_status"
+    | "activity_fee_status"
+    | "budget_summary"
+    | "cashflow_summary"
+    | "activity_settlement_status"
+    | "evidence_missing"
+    | "report_missing"
+    | "audit_readiness"
+    | "document_summary"
+    | "receipt_summary"
+    | "unknown";
+  data_sources: string[];
+  links: AssistantChatLink[];
+  confidence: number;
+};
+
+export async function getAssistantChatSuggestions(): Promise<string[]> {
+  const response = await apiFetch<{ suggestions: string[] }>("/api/assistant/chat/suggestions");
+  return response.suggestions;
+}
+
+export async function sendAssistantChat(payload: {
+  message: string;
+  context?: AssistantChatContext | null;
+}): Promise<AssistantChatResponse> {
+  return apiFetch<AssistantChatResponse>("/api/assistant/chat", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
 
 export async function executeAssistant(
   formData: FormData,
@@ -2209,6 +2680,34 @@ export async function confirmParticipantImport(
   return apiFetch<ParticipantImportConfirmResult>(
     `/api/activities/${activityId}/participants/import/confirm`,
     { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+// ─── Activity Audit Checklist (Task 34) ──────────────────────────────────────
+
+export type AuditCheckItem = {
+  key: string;
+  label: string;
+  done: boolean;
+  detail: string | null;
+  count: number | null;
+  warning: string | null;
+};
+
+export type ActivityAuditCheckResult = {
+  activity_id: string;
+  activity_title: string;
+  total_done: number;
+  total_items: number;
+  ready_for_audit: boolean;
+  items: AuditCheckItem[];
+};
+
+export async function getActivityAuditChecklist(
+  activityId: string,
+): Promise<ActivityAuditCheckResult> {
+  return apiFetch<ActivityAuditCheckResult>(
+    `/api/activities/${activityId}/audit-checklist`,
   );
 }
 

@@ -17,6 +17,10 @@ class BankTransactionBase(ORMModel):
     matched_member_id: UUID | None = None
     payment_type: str | None = None
     match_status: str = "unmatched"
+    budget_category_id: UUID | None = None
+    linked_activity_id: UUID | None = None
+    review_status: str = "open"
+    review_note: str | None = None
 
 
 class BankTransactionCreate(BankTransactionBase):
@@ -35,6 +39,10 @@ class BankTransactionUpdate(ORMModel):
     matched_member_id: UUID | None = None
     payment_type: str | None = None
     match_status: str | None = None
+    budget_category_id: UUID | None = None
+    linked_activity_id: UUID | None = None
+    review_status: str | None = None
+    review_note: str | None = None
 
 
 class BankTransactionRead(BankTransactionBase):
@@ -74,4 +82,3 @@ class BankStatementImportResponse(ORMModel):
     duplicate_rows: int
     errors: list[str]
     warnings: list[str]
-

@@ -22,19 +22,28 @@ class ManualPaymentPayload(BaseModel):
     required_amount: int = 0
     paid_amount: int = 0
     status: str | None = None
+    manual_note: str | None = None
 
 
 def _auto_status(paid: int, required: int, explicit: str | None) -> str:
-    """Compute status from amounts unless user supplied an explicit value."""
-    if explicit:
+    """Compute status from amounts unless user supplied a manual review state."""
+    if explicit in {"need_check", "cancelled"}:
         return explicit
+    if explicit == "paid" and required > 0 and paid <= 0:
+        return "paid"
+    if explicit == "unpaid":
+        return "exempt" if required <= 0 else "unpaid"
+    if explicit == "exempt":
+        return "exempt"
     if required <= 0:
         return "exempt"
-    if paid >= required:
-        return "paid"
-    if paid > 0:
+    if paid <= 0:
+        return "unpaid"
+    if paid < required:
         return "partial"
-    return "unpaid"
+    if paid == required:
+        return "paid"
+    return "overpaid"
 
 
 def _auto_paid_amount(status: str, paid: int, required: int) -> int:
@@ -79,7 +88,7 @@ def _enrich(
 @router.get("", response_model=list[PaymentRecordRead])
 def list_payment_records(
     skip: int = Query(default=0, ge=0),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=1000, ge=1, le=10000),
     member_id: UUID | None = None,
     period: str | None = None,
     status: str | None = None,
@@ -200,7 +209,8 @@ def unmatch_payment_record(
     # Reset payment record
     record.transaction_id = None
     record.paid_amount = 0
-    record.status = "unpaid"
+    record.status = _auto_status(0, int(record.required_amount or 0), None)
+    record.payment_source = None
 
     commit_or_400(db, "Could not unmatch payment record")
     db.refresh(record)
@@ -402,6 +412,8 @@ def upsert_manual_payment_record(
     status = _auto_status(payload.paid_amount, payload.required_amount, payload.status)
     # Auto-correct paid_amount for consistency
     paid_amount = _auto_paid_amount(status, payload.paid_amount, payload.required_amount)
+    if payload.payment_type != "membership_fee":
+        raise HTTPException(status_code=400, detail="This endpoint only supports membership_fee")
 
     existing: PaymentRecord | None = db.execute(
         select(PaymentRecord).where(
@@ -417,6 +429,8 @@ def upsert_manual_payment_record(
         existing.required_amount = payload.required_amount
         existing.paid_amount = paid_amount
         existing.status = status
+        existing.payment_source = "manual"
+        existing.manual_note = payload.manual_note
         commit_or_400(db, "Could not update payment record")
         db.refresh(existing)
         activity = db.get(ActivityReport, existing.activity_report_id) if existing.activity_report_id else None
@@ -429,8 +443,108 @@ def upsert_manual_payment_record(
             required_amount=payload.required_amount,
             paid_amount=paid_amount,
             status=status,
+            payment_source="manual",
+            manual_note=payload.manual_note,
         )
         db.add(record)
         commit_or_400(db, "Could not create payment record")
         db.refresh(record)
         return _enrich(record, member)
+
+
+# ─── Membership fee bulk update (Task 37) ─────────────────────────────────────
+
+class MembershipBulkUpdatePreviewPayload(BaseModel):
+    period: str
+    payment_record_ids: list[str]
+    operation: str  # mark_paid | mark_unpaid | mark_need_check | mark_exempt | set_paid_amount
+    paid_amount_value: int | None = None
+
+
+class MembershipBulkUpdateConfirmPayload(BaseModel):
+    action_id: str
+
+
+@router.post("/membership/bulk-preview")
+def membership_bulk_update_preview(
+    payload: MembershipBulkUpdatePreviewPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Preview bulk update for membership_fee records. Never modifies DB."""
+    from app.services.membership_fee_bulk_update_service import preview_bulk_update
+
+    try:
+        result = preview_bulk_update(
+            db=db,
+            period=payload.period,
+            payment_record_ids=payload.payment_record_ids,
+            operation=payload.operation,
+            paid_amount_value=payload.paid_amount_value,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"미리보기 생성 오류: {e}")
+
+    return {
+        "ok": result.ok,
+        "requires_confirmation": result.requires_confirmation,
+        "auto_apply": result.auto_apply,
+        "action_id": result.action_id,
+        "operation": result.operation,
+        "period": result.period,
+        "summary": {
+            "selected": result.summary.selected,
+            "will_change": result.summary.will_change,
+            "no_change": result.summary.no_change,
+            "will_be_paid": result.summary.will_be_paid,
+            "will_be_exempt": result.summary.will_be_exempt,
+            "will_be_unpaid": result.summary.will_be_unpaid,
+            "will_be_need_check": result.summary.will_be_need_check,
+            "danger": result.summary.danger,
+            "danger_reason": result.summary.danger_reason,
+        },
+        "rows": [
+            {
+                "payment_record_id": row.payment_record_id,
+                "member_id": row.member_id,
+                "member_name": row.member_name,
+                "student_id": row.student_id,
+                "before_required_amount": row.before_required_amount,
+                "before_paid_amount": row.before_paid_amount,
+                "before_status": row.before_status,
+                "after_required_amount": row.after_required_amount,
+                "after_paid_amount": row.after_paid_amount,
+                "after_status": row.after_status,
+                "will_change": row.will_change,
+                "note": row.note,
+            }
+            for row in result.rows
+        ],
+    }
+
+
+@router.post("/membership/bulk-confirm")
+def membership_bulk_update_confirm(
+    payload: MembershipBulkUpdateConfirmPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Apply a previewed bulk update proposal. Re-validates scope before applying."""
+    from app.services.membership_fee_bulk_update_service import confirm_bulk_update
+
+    try:
+        action_id = UUID(payload.action_id)
+        result = confirm_bulk_update(db=db, action_id=action_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"반영 오류: {e}")
+
+    return {
+        "ok": result.ok,
+        "operation": result.operation,
+        "period": result.period,
+        "updated_count": result.updated_count,
+        "skipped_count": result.skipped_count,
+        "rows_updated": result.rows_updated,
+    }
