@@ -8,6 +8,7 @@ import {
   ChevronRight,
   MapPin,
   Plus,
+  Trash2,
   Users,
 } from "lucide-react";
 
@@ -28,6 +29,7 @@ import {
   type ActivitySummary,
   type Member,
   createActivity,
+  deleteActivity,
   getActivities,
   getActivityCategoriesTyped,
   getMembersFiltered,
@@ -74,9 +76,11 @@ function feeStatusColor(s: string): string {
 interface ActivityCardProps {
   activity: ActivitySummary;
   categoryName: string;
+  onDelete: (activity: ActivitySummary) => void;
+  deleting: boolean;
 }
 
-function ActivityCard({ activity }: ActivityCardProps) {
+function ActivityCard({ activity, onDelete, deleting }: ActivityCardProps) {
   return (
     <Link href={`/activities/${activity.id}`}>
       <div
@@ -90,14 +94,30 @@ function ActivityCard({ activity }: ActivityCardProps) {
         {/* Top row */}
         <div className="flex items-start justify-between gap-2 mb-3">
           <StatusBadge status={activity.status} />
-          {activity.category_name && (
-            <span
-              className="text-xs truncate max-w-[120px] shrink-0"
-              style={{ color: "var(--text-muted)" }}
+          <div className="flex items-center gap-2">
+            {activity.category_name && (
+              <span
+                className="text-xs truncate max-w-[120px] shrink-0"
+                style={{ color: "var(--text-muted)" }}
+              >
+                {activity.category_name}
+              </span>
+            )}
+            <button
+              type="button"
+              aria-label="활동 삭제"
+              disabled={deleting}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onDelete(activity);
+              }}
+              className="rounded-lg p-1.5 transition-opacity hover:opacity-75 disabled:opacity-40"
+              style={{ color: "var(--danger)", background: "var(--danger-soft)" }}
             >
-              {activity.category_name}
-            </span>
-          )}
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
 
         {/* Title */}
@@ -361,6 +381,7 @@ export default function ActivitiesPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [redirectTo, setRedirectTo] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -403,6 +424,23 @@ export default function ActivitiesPage() {
     { value: "", label: "전체 카테고리" },
     ...categories.map((c) => ({ value: c.id, label: c.name })),
   ];
+
+  async function handleDelete(activity: ActivitySummary) {
+    const ok = window.confirm(
+      "이 활동을 삭제하시겠습니까?\n참여자, 파일, 납부 기록은 복구를 위해 보관되지만 활동 목록에서는 보이지 않습니다.",
+    );
+    if (!ok) return;
+    setDeletingId(activity.id);
+    setError(null);
+    try {
+      await deleteActivity(activity.id);
+      setActivities((prev) => prev.filter((a) => a.id !== activity.id));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "활동 삭제에 실패했습니다.");
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   return (
     <AppShell>
@@ -463,6 +501,8 @@ export default function ActivitiesPage() {
                 key={a.id}
                 activity={a}
                 categoryName={a.category_id ? (categoryMap[a.category_id] ?? "") : ""}
+                onDelete={handleDelete}
+                deleting={deletingId === a.id}
               />
             ))}
           </div>

@@ -7,6 +7,11 @@ interface Props {
 
 export function PaymentMatchingResultCard({ result, resultType }: Props) {
   const isPreview = resultType === "payment_matching_preview";
+  const paymentType = String(result.payment_type ?? "membership_fee");
+  const domainLabel = paymentType === "activity_fee" ? "활동비" : "회비";
+  const cardTitle = isPreview
+    ? `${domainLabel} 거래내역 매칭 미리보기`
+    : `${domainLabel} 거래내역 매칭 완료`;
   const unpaidSample: string[] = Array.isArray(result.unpaid_sample) ? result.unpaid_sample.map(String) : [];
   const unpaidCount = Number(result.unpaid_count ?? 0);
   const needCheckCount = Number(result.need_check_count ?? 0);
@@ -33,6 +38,7 @@ export function PaymentMatchingResultCard({ result, resultType }: Props) {
 
   return (
     <div className="space-y-4">
+      <p className="text-sm font-semibold" style={{ color: "var(--text-main)" }}>{cardTitle}</p>
       <ResultSummaryGrid items={items} cols={4} />
 
       <div className="space-y-0">

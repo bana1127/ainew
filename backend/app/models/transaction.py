@@ -45,6 +45,11 @@ class BankTransaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="bank_transactions"
     )
     payment_records: Mapped[list[PaymentRecord]] = relationship(
-        back_populates="transaction"
+        back_populates="transaction",
+        foreign_keys="[PaymentRecord.transaction_id]",
+    )
+    refund_payment_records: Mapped[list[PaymentRecord]] = relationship(
+        back_populates="refund_transaction",
+        foreign_keys="[PaymentRecord.refund_transaction_id]",
     )
 

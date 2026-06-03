@@ -10,6 +10,11 @@ import {
   getTransactionsTyped,
   importTransactions,
   parseTransactionPreview,
+  unmatchTransaction,
+  matchRefundTransaction,
+  unmatchRefundTransaction,
+  getRefundRecords,
+  type RefundRecord,
 } from "@/lib/api";
 
 import { AppShell } from "@/components/layout/AppShell";
@@ -43,6 +48,12 @@ export default function TransactionsPage() {
   const [transactions, setTransactions] = useState<BankTransaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  const [unmatching, setUnmatching] = useState<string | null>(null);
+  const [refundMatchTarget, setRefundMatchTarget] = useState<BankTransaction | null>(null);
+  const [refundRecords, setRefundRecords] = useState<RefundRecord[]>([]);
+  const [selectedRefundRecordId, setSelectedRefundRecordId] = useState("");
+  const [refundMatchBusy, setRefundMatchBusy] = useState(false);
+  const [refundMatchError, setRefundMatchError] = useState<string | null>(null);
   const [filters, setFilters] = useState<TransactionQueryParams>({
     q: "", match_status: "", payment_type: "", start_date: "", end_date: "",
   });
@@ -66,6 +77,53 @@ export default function TransactionsPage() {
   };
 
   useEffect(() => { loadTransactions(); }, []);
+
+  const openRefundMatch = async (txn: BankTransaction) => {
+    setRefundMatchTarget(txn);
+    setRefundMatchError(null);
+    setSelectedRefundRecordId("");
+    try {
+      const recs = await getRefundRecords({ refund_status: "refund_required" });
+      setRefundRecords(recs);
+    } catch { setRefundRecords([]); }
+  };
+
+  const handleRefundMatch = async () => {
+    if (!refundMatchTarget || !selectedRefundRecordId) return;
+    setRefundMatchBusy(true);
+    setRefundMatchError(null);
+    try {
+      await matchRefundTransaction(refundMatchTarget.id, { payment_record_id: selectedRefundRecordId });
+      setRefundMatchTarget(null);
+      await loadTransactions();
+    } catch (e: unknown) {
+      setRefundMatchError(e instanceof Error ? e.message : "환불 매칭 실패");
+    } finally { setRefundMatchBusy(false); }
+  };
+
+  const handleUnmatchRefund = async (transactionId: string) => {
+    if (!confirm("환불 매칭을 취소하시겠습니까?")) return;
+    setUnmatching(transactionId);
+    try {
+      await unmatchRefundTransaction(transactionId);
+      await loadTransactions();
+    } catch (e: unknown) {
+      setListError(e instanceof Error ? e.message : "환불 매칭 취소 실패");
+    } finally { setUnmatching(null); }
+  };
+
+  const handleUnmatch = async (transactionId: string) => {
+    if (!confirm("이 거래내역 매칭을 취소하시겠습니까?\n납부 상태가 미납 또는 부분 납부로 되돌아갈 수 있습니다.")) return;
+    setUnmatching(transactionId);
+    try {
+      await unmatchTransaction(transactionId);
+      await loadTransactions();
+    } catch (e: unknown) {
+      setListError(e instanceof Error ? e.message : "매칭 취소 실패");
+    } finally {
+      setUnmatching(null);
+    }
+  };
 
   const handlePreview = async () => {
     if (!selectedFile) return;
@@ -401,7 +459,7 @@ export default function TransactionsPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr style={{ background: "var(--surface-soft)", borderBottom: "1px solid var(--border-soft)" }}>
-                    {["거래일시", "구분", "적요", "출금액", "입금액", "잔액", "거래점", "매칭상태", "납부유형", "생성일"].map((h) => (
+                    {["거래일시", "구분", "적요", "출금액", "입금액", "잔액", "거래점", "매칭상태", "납부유형", "생성일", "매칭 취소", "환불 매칭"].map((h) => (
                       <th key={h}
                         className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide"
                         style={{ color: "var(--text-muted)" }}>
@@ -450,6 +508,27 @@ export default function TransactionsPage() {
                         style={{ color: "var(--text-muted)" }}>
                         {fmtDate(t.created_at)}
                       </td>
+                      <td className="px-4 py-3">
+                        {t.match_status === "matched" && (
+                          <Button size="sm" variant="ghost" disabled={unmatching === t.id}
+                            onClick={() => handleUnmatch(t.id)}>
+                            {unmatching === t.id ? "..." : "매칭 취소"}
+                          </Button>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {t.match_status === "refund_matched" ? (
+                          <Button size="sm" variant="ghost" disabled={unmatching === t.id}
+                            onClick={() => handleUnmatchRefund(t.id)}>
+                            {unmatching === t.id ? "..." : "환불취소"}
+                          </Button>
+                        ) : t.withdraw_amount > 0 && t.match_status !== "matched" ? (
+                          <Button size="sm" variant="ghost"
+                            onClick={() => openRefundMatch(t)}>
+                            환불로 매칭
+                          </Button>
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -459,6 +538,44 @@ export default function TransactionsPage() {
           )}
         </Card>
       </div>
+
+      {/* Refund match modal */}
+      {refundMatchTarget && (
+        <div className="fixed inset-0 flex items-center justify-center z-50"
+          style={{ background: "rgba(31,31,36,0.5)" }}>
+          <div className="rounded-2xl p-6 w-full max-w-md space-y-4"
+            style={{ background: "var(--surface)", border: "1px solid var(--border-soft)" }}>
+            <h3 className="text-base font-semibold" style={{ color: "var(--text-main)" }}>환불 거래내역 매칭</h3>
+            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+              출금: {fmt(refundMatchTarget.withdraw_amount)}원 — {refundMatchTarget.memo ?? ""}
+            </p>
+            <div>
+              <label className="text-xs mb-1 block" style={{ color: "var(--text-muted)" }}>환불 대상 납부기록 선택</label>
+              <select
+                className="w-full rounded-xl px-3 py-2 text-sm min-h-[44px]"
+                style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)" }}
+                value={selectedRefundRecordId}
+                onChange={(e) => setSelectedRefundRecordId(e.target.value)}
+              >
+                <option value="">-- 선택 --</option>
+                {refundRecords.map((r) => (
+                  <option key={r.payment_record_id} value={r.payment_record_id}>
+                    {r.member_name ?? "-"} — {r.activity_title ?? "-"} — 납부 {fmt(r.paid_amount)}원
+                  </option>
+                ))}
+              </select>
+              {refundRecords.length === 0 && (
+                <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>환불 필요 상태인 납부 기록이 없습니다.</p>
+              )}
+            </div>
+            {refundMatchError && <p className="text-sm" style={{ color: "var(--danger)" }}>{refundMatchError}</p>}
+            <div className="flex gap-2">
+              <Button onClick={handleRefundMatch} loading={refundMatchBusy} disabled={!selectedRefundRecordId}>환불 매칭</Button>
+              <Button variant="secondary" onClick={() => setRefundMatchTarget(null)} disabled={refundMatchBusy}>취소</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </AppShell>
   );
 }

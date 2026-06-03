@@ -14,6 +14,8 @@ class PaymentMatchingPayload(BaseModel):
     required_amount: int | None = None
     start_date: date | None = None
     end_date: date | None = None
+    match_mode: str = "auto"  # auto | membership_fee | activity_fee | selected_activity_fee | none
+    activity_id: UUID | None = None  # for selected_activity_fee mode
 
 
 class PaymentConfirmPayload(BaseModel):
@@ -40,6 +42,14 @@ class TransactionMatchItemSchema(ORMModel):
     match_status: str
     score: float | None = None
     reason: str | None = None
+    activity_id: UUID | None = None
+    activity_title: str | None = None
+    match_mode: str | None = None
+    expected_amount: int | None = None
+    amount_difference: int | None = None
+    amount_status: str | None = None
+    auto_match: bool = False
+    fee_tier: str | None = None
 
 
 class MemberSummarySchema(ORMModel):

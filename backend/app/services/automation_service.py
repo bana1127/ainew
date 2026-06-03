@@ -58,6 +58,9 @@ class WeeklyCheckResult:
     unmatched_transactions: int = 0
     draft_reports: int = 0
     unread_notifications: int = 0
+    overpaid_count: int = 0
+    refund_required_count: int = 0
+    refund_pending_count: int = 0
     items: list[str] = field(default_factory=list)
     severity: str = "info"
 
@@ -112,6 +115,28 @@ def run_weekly_check(db: Session) -> WeeklyCheckResult:
     result.unread_notifications = len(unread)
     if result.unread_notifications:
         items.append(f"읽지 않은 알림 {result.unread_notifications}건")
+
+    # 오납/환불 필요/환불 대기 (Task 21)
+    overpaid_records = db.execute(
+        select(PaymentRecord).where(PaymentRecord.status == "overpaid")
+    ).scalars().all()
+    result.overpaid_count = len(overpaid_records)
+    if result.overpaid_count:
+        items.append(f"오납 {result.overpaid_count}건")
+
+    refund_required = db.execute(
+        select(PaymentRecord).where(PaymentRecord.refund_status == "refund_required")
+    ).scalars().all()
+    result.refund_required_count = len(refund_required)
+    if result.refund_required_count:
+        items.append(f"환불 필요 {result.refund_required_count}건")
+
+    refund_pending = db.execute(
+        select(PaymentRecord).where(PaymentRecord.refund_status == "refund_pending")
+    ).scalars().all()
+    result.refund_pending_count = len(refund_pending)
+    if result.refund_pending_count:
+        items.append(f"환불 대기 {result.refund_pending_count}건")
 
     result.items = items
     result.severity = "warning" if items else "info"

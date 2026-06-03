@@ -10,6 +10,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 class Settings(BaseSettings):
     APP_NAME: str = "ClubAgent"
+    CLUB_NAME: str = "ClubAgent"
     APP_ENV: str = "development"
     DATABASE_URL: str = Field(
         default="postgresql+psycopg://clubagent:clubagent@localhost:5433/clubagent"

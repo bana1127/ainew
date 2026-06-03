@@ -25,13 +25,27 @@ class PaymentRecordUpdate(ORMModel):
     paid_amount: int | None = None
     status: str | None = None
     transaction_id: UUID | None = None
+    fee_tier: str | None = None
+    fee_rule_reason: str | None = None
+    joined_term: str | None = None
+    current_term: str | None = None
 
 
 class PaymentRecordRead(PaymentRecordBase):
     id: UUID
     created_at: datetime
     updated_at: datetime
+    # Member info (populated by enrichment)
     member_name: str | None = None
     student_id: str | None = None
     department: str | None = None
-
+    # Activity context for activity_fee records
+    activity_report_id: UUID | None = None
+    activity_title: str | None = None
+    # Refund tracking (Task 21)
+    refund_status: str | None = None
+    refund_amount: int | None = None
+    fee_tier: str | None = None
+    fee_rule_reason: str | None = None
+    joined_term: str | None = None
+    current_term: str | None = None

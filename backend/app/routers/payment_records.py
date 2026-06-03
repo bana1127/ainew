@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models import BankTransaction, Member, PaymentRecord
+from app.models.activity import ActivityReport
 from app.routers.common import apply_updates, commit_or_400, get_or_404
 from app.schemas import PaymentRecordCreate, PaymentRecordRead, PaymentRecordUpdate
 from pydantic import BaseModel
@@ -28,7 +29,7 @@ def _auto_status(paid: int, required: int, explicit: str | None) -> str:
     if explicit:
         return explicit
     if required <= 0:
-        return "unpaid"
+        return "exempt"
     if paid >= required:
         return "paid"
     if paid > 0:
@@ -56,13 +57,22 @@ def ensure_relations(
         raise HTTPException(status_code=404, detail="Transaction not found")
 
 
-def _enrich(record: PaymentRecord, member: Member | None) -> PaymentRecordRead:
-    """Build a PaymentRecordRead with member info attached."""
+def _enrich(
+    record: PaymentRecord,
+    member: Member | None,
+    activity: ActivityReport | None = None,
+) -> PaymentRecordRead:
+    """Build a PaymentRecordRead with member + activity info attached."""
     data = PaymentRecordRead.model_validate(record)
     if member:
         data.member_name = member.name
         data.student_id = member.student_id
         data.department = member.department
+    if activity:
+        data.activity_title = activity.title
+    # Populate refund fields from model (not in base schema)
+    data.refund_status = getattr(record, "refund_status", None)
+    data.refund_amount = getattr(record, "refund_amount", None)
     return data
 
 
@@ -96,7 +106,23 @@ def list_payment_records(
         ).scalars().all()
         members_map = {m.id: m for m in members}
 
-    return [_enrich(r, members_map.get(r.member_id)) for r in records]
+    # Bulk-load activity info (only for activity_fee records)
+    activity_report_ids = {r.activity_report_id for r in records if r.activity_report_id}
+    activities_map: dict[UUID, ActivityReport] = {}
+    if activity_report_ids:
+        acts = db.execute(
+            select(ActivityReport).where(ActivityReport.id.in_(activity_report_ids))
+        ).scalars().all()
+        activities_map = {a.id: a for a in acts}
+
+    return [
+        _enrich(
+            r,
+            members_map.get(r.member_id),
+            activities_map.get(r.activity_report_id) if r.activity_report_id else None,
+        )
+        for r in records
+    ]
 
 
 @router.post("", response_model=PaymentRecordRead)
@@ -120,7 +146,8 @@ def get_payment_record(
 ) -> PaymentRecordRead:
     record = get_or_404(db, PaymentRecord, payment_id, "Payment record")
     member = db.get(Member, record.member_id)
-    return _enrich(record, member)
+    activity = db.get(ActivityReport, record.activity_report_id) if record.activity_report_id else None
+    return _enrich(record, member, activity)
 
 
 @router.patch("/{payment_id}", response_model=PaymentRecordRead)
@@ -136,7 +163,8 @@ def update_payment_record(
     commit_or_400(db, "Could not update payment record")
     db.refresh(record)
     member = db.get(Member, record.member_id)
-    return _enrich(record, member)
+    activity = db.get(ActivityReport, record.activity_report_id) if record.activity_report_id else None
+    return _enrich(record, member, activity)
 
 
 @router.delete("/{payment_id}", response_model=PaymentRecordRead)
@@ -146,10 +174,219 @@ def delete_payment_record(
 ) -> PaymentRecordRead:
     record = get_or_404(db, PaymentRecord, payment_id, "Payment record")
     member = db.get(Member, record.member_id)
-    enriched = _enrich(record, member)
+    activity = db.get(ActivityReport, record.activity_report_id) if record.activity_report_id else None
+    enriched = _enrich(record, member, activity)
     db.delete(record)
     commit_or_400(db, "Could not delete payment record")
     return enriched
+
+
+@router.post("/{payment_id}/unmatch")
+def unmatch_payment_record(
+    payment_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Cancel the transaction match for a payment record and restore unpaid status."""
+    record: PaymentRecord = get_or_404(db, PaymentRecord, payment_id, "Payment record")
+
+    # Revert linked transaction
+    if record.transaction_id:
+        txn = db.get(BankTransaction, record.transaction_id)
+        if txn:
+            txn.match_status = "unmatched"
+            txn.matched_member_id = None
+            # Keep payment_type for classification reference — only reset match_status
+
+    # Reset payment record
+    record.transaction_id = None
+    record.paid_amount = 0
+    record.status = "unpaid"
+
+    commit_or_400(db, "Could not unmatch payment record")
+    db.refresh(record)
+    member = db.get(Member, record.member_id)
+    return {
+        "ok": True,
+        "payment_record_id": str(record.id),
+        "status": record.status,
+        "paid_amount": record.paid_amount,
+        "transaction_id": None,
+    }
+
+
+# ── Task 21: Refund status endpoints ──────────────────────────────────────────
+
+class RefundPayload(BaseModel):
+    refund_amount: int | None = None
+    reason: str | None = None
+
+
+class MarkRefundedPayload(BaseModel):
+    refund_transaction_id: str | None = None
+    refund_amount: int | None = None
+    reason: str | None = None
+
+
+class RefundCancelPayload(BaseModel):
+    reason: str | None = None
+
+
+@router.post("/{payment_id}/refund-required")
+def set_refund_required(
+    payment_id: UUID,
+    payload: RefundPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.services.settlement_service import mark_refund_required
+    try:
+        record = mark_refund_required(db, payment_id, payload.refund_amount, payload.reason)
+        db.commit()
+        db.refresh(record)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {
+        "ok": True,
+        "payment_record_id": str(record.id),
+        "refund_status": record.refund_status,
+        "refund_amount": record.refund_amount,
+    }
+
+
+@router.post("/{payment_id}/refund-pending")
+def set_refund_pending(
+    payment_id: UUID,
+    payload: RefundPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.services.settlement_service import mark_refund_pending
+    try:
+        record = mark_refund_pending(db, payment_id, payload.refund_amount, payload.reason)
+        db.commit()
+        db.refresh(record)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {
+        "ok": True,
+        "payment_record_id": str(record.id),
+        "refund_status": record.refund_status,
+        "refund_amount": record.refund_amount,
+    }
+
+
+@router.post("/{payment_id}/mark-refunded")
+def set_mark_refunded(
+    payment_id: UUID,
+    payload: MarkRefundedPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    from uuid import UUID as _UUID
+    from app.services.settlement_service import mark_refunded
+    txn_id = _UUID(payload.refund_transaction_id) if payload.refund_transaction_id else None
+    try:
+        record = mark_refunded(db, payment_id, txn_id, payload.refund_amount, payload.reason)
+        db.commit()
+        db.refresh(record)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {
+        "ok": True,
+        "payment_record_id": str(record.id),
+        "refund_status": record.refund_status,
+        "refund_amount": record.refund_amount,
+        "status": record.status,
+    }
+
+
+@router.post("/{payment_id}/refund-cancel")
+def refund_cancel(
+    payment_id: UUID,
+    payload: RefundCancelPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.services.settlement_service import cancel_refund
+    try:
+        record = cancel_refund(db, payment_id, payload.reason)
+        db.commit()
+        db.refresh(record)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {
+        "ok": True,
+        "payment_record_id": str(record.id),
+        "refund_status": record.refund_status,
+        "status": record.status,
+    }
+
+
+@router.get("/{payment_id}/adjustment-logs")
+def get_adjustment_logs(
+    payment_id: UUID,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    from sqlalchemy import select as _select
+    from app.models.payment import PaymentAdjustmentLog
+    logs = list(db.scalars(
+        _select(PaymentAdjustmentLog)
+        .where(PaymentAdjustmentLog.payment_record_id == payment_id)
+        .order_by(PaymentAdjustmentLog.created_at.desc())
+    ))
+    return [
+        {
+            "id": str(log.id),
+            "action": log.action,
+            "previous_status": log.previous_status,
+            "new_status": log.new_status,
+            "previous_paid_amount": log.previous_paid_amount,
+            "new_paid_amount": log.new_paid_amount,
+            "refund_amount": log.refund_amount,
+            "reason": log.reason,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+        }
+        for log in logs
+    ]
+
+
+class ManualPaymentUpdatePayload(BaseModel):
+    activity_id: UUID
+    member_name: str | None = None
+    student_id: str | None = None
+    paid_amount: int | None = None
+    payment_type: str = "activity_fee"
+    raw_request: str | None = None
+
+
+@router.post("/manual-update")
+def manual_payment_update(
+    payload: ManualPaymentUpdatePayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Apply a manual payment status change for a specific member in an activity."""
+    from app.services.payment_manual_update_service import apply_manual_payment_update
+    result = apply_manual_payment_update(
+        db=db,
+        activity_id=payload.activity_id,
+        message=payload.raw_request or "",
+        member_name=payload.member_name,
+        student_id=payload.student_id,
+        amount=payload.paid_amount,
+        payment_type=payload.payment_type,
+    )
+    return {
+        "ok": result.ok,
+        "requires_confirmation": result.requires_confirmation,
+        "member_name": result.member_name,
+        "payment_type": result.payment_type,
+        "activity_id": result.activity_id,
+        "activity_title": result.activity_title,
+        "required_amount": result.required_amount,
+        "previous_paid_amount": result.previous_paid_amount,
+        "new_paid_amount": result.new_paid_amount,
+        "previous_status": result.previous_status,
+        "new_status": result.new_status,
+        "payment_record_id": result.payment_record_id,
+        "message": result.message,
+        "candidates": result.candidates,
+    }
 
 
 @router.put("/manual", response_model=PaymentRecordRead)
@@ -182,7 +419,8 @@ def upsert_manual_payment_record(
         existing.status = status
         commit_or_400(db, "Could not update payment record")
         db.refresh(existing)
-        return _enrich(existing, member)
+        activity = db.get(ActivityReport, existing.activity_report_id) if existing.activity_report_id else None
+        return _enrich(existing, member, activity)
     else:
         record = PaymentRecord(
             member_id=payload.member_id,

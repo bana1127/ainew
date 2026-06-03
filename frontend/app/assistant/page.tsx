@@ -14,13 +14,16 @@ import { AssistantResultCard, type RunStatus } from "@/components/assistant/Assi
 import { ApplyConfirmDialog } from "@/components/assistant/ApplyConfirmDialog";
 import {
   executeAssistant,
+  confirmAssistantAction,
   applyPaymentMatching,
   importTransactions,
+  applyFormImport,
   createActivity,
   getActivities,
   type AssistantExecuteResponse,
   type ActivitySummary,
   type ActivityCreate,
+  type FormImportRow,
 } from "@/lib/api";
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -94,7 +97,7 @@ export default function AssistantPage() {
   const [autoApply, setAutoApply] = useState(false);
   const [period, setPeriod] = useState("2026-1");
   const [paymentType, setPaymentType] = useState("membership_fee");
-  const [requiredAmount, setRequiredAmount] = useState(30000);
+  const [requiredAmount, setRequiredAmount] = useState(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Activity mode state
@@ -275,27 +278,39 @@ export default function AssistantPage() {
     if (!run) return;
     setApplying(true);
     try {
-      const { response, files: rf, period: p, paymentType: pt, requiredAmount: ra, activityId, activityMode: am } = run;
+      const { response } = run;
+      const actionId = response.apply_payload?.action_id as string | undefined;
 
-      if (response.result_type === "payment_matching_preview") {
-        await applyPaymentMatching({ period: p, payment_type: pt, required_amount: ra });
-        setRuns((prev) => prev.map((r) => r.id === run.id ? { ...r, status: "applied" as RunStatus } : r));
-      } else if (response.result_type === "bank_statement_preview") {
-        if (rf[0]) await importTransactions(rf[0]);
-        setRuns((prev) => prev.map((r) => r.id === run.id ? { ...r, status: "applied" as RunStatus } : r));
+      if (actionId) {
+        // Task 25: use proposal confirm endpoint — no DB change until this call
+        const result = await confirmAssistantAction(actionId);
+        setRuns((prev) => prev.map((r) =>
+          r.id === run.id
+            ? { ...r, response: { ...r.response, result: { ...r.response.result, applied_result: result.result, action_status: result.status } }, status: "applied" as RunStatus }
+            : r
+        ));
       } else {
-        const fd = new FormData();
-        if (run.requestMessage) fd.append("message", run.requestMessage);
-        fd.append("requested_intent", response.intent);
-        fd.append("auto_apply", "true");
-        fd.append("period", p);
-        fd.append("payment_type", pt);
-        fd.append("required_amount", String(ra));
-        fd.append("activity_mode", am);
-        if (activityId) fd.append("activity_id", activityId);
-        for (const f of rf) fd.append("files", f);
-        const res = await executeAssistant(fd);
-        setRuns((prev) => prev.map((r) => r.id === run.id ? { ...r, response: res, status: "applied" as RunStatus } : r));
+        // Legacy fallback for intents that don't have action_id yet
+        const { files: rf, period: p, paymentType: pt, requiredAmount: ra, activityId, activityMode: am } = run;
+        if (response.result_type === "payment_matching_preview") {
+          await applyPaymentMatching({ period: p, payment_type: pt, required_amount: ra });
+          setRuns((prev) => prev.map((r) => r.id === run.id ? { ...r, status: "applied" as RunStatus } : r));
+        } else if (response.result_type === "bank_statement_preview") {
+          if (rf[0]) await importTransactions(rf[0]);
+          setRuns((prev) => prev.map((r) => r.id === run.id ? { ...r, status: "applied" as RunStatus } : r));
+        } else if (response.apply_payload?.intent === "google_form_import") {
+          await applyFormImport({
+            import_id: (response.apply_payload.import_id as string | undefined) ?? null,
+            activity_id: response.apply_payload.activity_id as string,
+            form_type: response.apply_payload.form_type as string,
+            rows: response.apply_payload.rows as FormImportRow[],
+          });
+          setRuns((prev) => prev.map((r) => r.id === run.id ? { ...r, status: "applied" as RunStatus } : r));
+        } else {
+          setRuns((prev) => prev.map((r) => r.id === run.id ? { ...r, status: "failed" as RunStatus } : r));
+          setError("확인 후 반영할 수 있는 제안이 없습니다.");
+          return;
+        }
       }
     } catch (err) {
       setRuns((prev) => prev.map((r) => r.id === run.id ? { ...r, status: "failed" as RunStatus } : r));
@@ -515,22 +530,12 @@ export default function AssistantPage() {
                 </div>
               </div>
 
-              {/* auto_apply */}
-              <div className="flex items-start gap-2.5 pt-1">
-                <input
-                  type="checkbox"
-                  id="auto-apply"
-                  checked={autoApply}
-                  onChange={(e) => setAutoApply(e.target.checked)}
-                  className="h-4 w-4 mt-0.5 rounded"
-                  style={{ accentColor: "var(--primary)" }}
-                />
-                <label htmlFor="auto-apply" className="text-sm" style={{ color: "var(--text-main)" }}>
-                  확인 없이 바로 반영
-                  <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-                    기본값은 꺼짐입니다. 먼저 미리보기 결과를 확인한 뒤 반영하는 것을 권장합니다.
-                  </p>
-                </label>
+              {/* Task 25: auto_apply is permanently disabled — all actions require confirmation */}
+              <div className="flex items-start gap-2.5 pt-1 rounded-xl px-3 py-2"
+                style={{ background: "var(--warning-soft)", border: "1px solid rgba(185,130,43,0.15)" }}>
+                <p className="text-xs" style={{ color: "var(--warning)" }}>
+                  모든 AI 작업은 확인 후 반영됩니다. 확인 버튼을 누르기 전까지 DB가 변경되지 않습니다.
+                </p>
               </div>
             </div>
           )}

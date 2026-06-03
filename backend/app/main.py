@@ -5,11 +5,13 @@ from app.core.config import settings
 from app.routers import (
     activities,
     activity_categories,
+    activity_form_imports,
     activity_reports,
     agents,
     assistant,
     automations,
     dashboard,
+    document_templates,
     files,
     health,
     members,
@@ -20,6 +22,8 @@ from app.routers import (
     receipts,
     reference_reports,
     settings as settings_router,
+    settlements,
+    submission_packages,
     transactions,
 )
 
@@ -38,6 +42,11 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
     app.include_router(activities.router, prefix="/api/activities", tags=["activities"])
+    app.include_router(
+        activity_form_imports.router,
+        prefix="/api/activity-form-imports",
+        tags=["activity-form-imports"],
+    )
     app.include_router(members.router, prefix="/api/members", tags=["members"])
     app.include_router(
         activity_categories.router,
@@ -81,6 +90,21 @@ def create_app() -> FastAPI:
     app.include_router(receipt_agents.router, prefix="/api/agents", tags=["agents"])
     app.include_router(assistant.router, prefix="/api/assistant", tags=["assistant"])
     app.include_router(automations.router, prefix="/api/automations", tags=["automations"])
+    app.include_router(
+        submission_packages.router,
+        prefix="/api/submission-packages",
+        tags=["submission-packages"],
+    )
+    app.include_router(
+        document_templates.router,
+        prefix="/api/document-templates",
+        tags=["document-templates"],
+    )
+    app.include_router(
+        settlements.router,
+        prefix="/api/settlements",
+        tags=["settlements"],
+    )
 
     @app.on_event("startup")
     def ensure_upload_directory() -> None:

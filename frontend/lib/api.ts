@@ -19,6 +19,8 @@ export type DashboardSummary = {
   total_withdraw_amount: number;
   total_payment_records: number;
   unpaid_count: number;
+  unpaid_membership_fee_count: number;
+  unpaid_activity_fee_count: number;
   unread_notifications: number;
 };
 
@@ -140,6 +142,16 @@ export type Member = {
   email: string | null;
   status: string;
   memo: string | null;
+  // Task 26-booster
+  gender: string | null;
+  grade: string | null;
+  birth_year: number | null;
+  joined_term: string | null;
+  term_code: string | null;
+  is_executive: boolean;
+  role: string | null;
+  is_officer: boolean;
+  officer_role: "president" | "vice_president" | "officer" | null;
   created_at: string;
   updated_at: string;
 };
@@ -152,6 +164,15 @@ export type MemberCreate = {
   email?: string | null;
   status?: string;
   memo?: string | null;
+  gender?: string | null;
+  grade?: string | null;
+  birth_year?: number | null;
+  joined_term?: string | null;
+  term_code?: string | null;
+  is_executive?: boolean;
+  role?: string | null;
+  is_officer?: boolean;
+  officer_role?: "president" | "vice_president" | "officer" | null;
 };
 
 export type MemberUpdate = Partial<MemberCreate>;
@@ -247,8 +268,21 @@ function buildQuery(params: Record<string, string | undefined>): string {
 export async function getMembersFiltered(params?: {
   status?: string;
   q?: string;
+  limit?: number;
+  is_executive?: boolean;
+  role?: string;
+  is_officer?: boolean;
+  officer_role?: string;
 }): Promise<Member[]> {
-  return apiFetch<Member[]>(`/api/members${buildQuery(params ?? {})}`);
+  const p: Record<string, string | undefined> = {};
+  if (params?.status) p.status = params.status;
+  if (params?.q) p.q = params.q;
+  if (params?.limit !== undefined) p.limit = String(params.limit);
+  if (params?.is_executive !== undefined) p.is_executive = String(params.is_executive);
+  if (params?.role) p.role = params.role;
+  if (params?.is_officer !== undefined) p.is_officer = String(params.is_officer);
+  if (params?.officer_role) p.officer_role = params.officer_role;
+  return apiFetch<Member[]>(`/api/members${buildQuery(p)}`);
 }
 
 export async function createMember(data: MemberCreate): Promise<Member> {
@@ -516,6 +550,14 @@ export type TransactionMatchItem = {
   match_status: string;
   score: number | null;
   reason: string | null;
+  activity_id: string | null;
+  activity_title: string | null;
+  match_mode: string | null;
+  expected_amount?: number | null;
+  amount_difference?: number | null;
+  amount_status?: string | null;
+  auto_match?: boolean;
+  fee_tier?: string | null;
 };
 
 export type MemberSummary = {
@@ -545,6 +587,8 @@ export type PaymentMatchingPayload = {
   required_amount?: number | null;
   start_date?: string | null;
   end_date?: string | null;
+  match_mode?: string;  // auto | membership_fee | activity_fee | selected_activity_fee | none
+  activity_id?: string | null;
 };
 
 export type PaymentMatchingPreview = {
@@ -595,8 +639,68 @@ export type PaymentRecord = {
   paid_amount: number;
   status: string;
   transaction_id: string | null;
+  activity_report_id?: string | null;
+  activity_title?: string | null;
+  refund_status?: string | null;
+  refund_amount?: number | null;
+  fee_tier?: string | null;
+  fee_rule_reason?: string | null;
+  joined_term?: string | null;
+  current_term?: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type MembershipFeePreviewPayload = {
+  period?: string | null;
+  new_member_fee?: number;
+  existing_member_fee?: number;
+  executive_fee?: number;
+};
+
+export type MembershipFeePreviewRow = {
+  member_id: string;
+  member_name: string;
+  student_id: string | null;
+  department: string | null;
+  joined_term: string | null;
+  term_code: string | null;
+  current_term: string;
+  is_officer: boolean;
+  officer_role: "president" | "vice_president" | "officer" | null;
+  role_label: string;
+  fee_tier: "new" | "existing" | "executive";
+  required_amount: number;
+  paid_amount: number;
+  status: string;
+  fee_rule_reason: string;
+  existing_record_id: string | null;
+  action: "create" | "update";
+};
+
+export type MembershipFeePreview = {
+  period: string;
+  payment_type: "membership_fee";
+  current_term: string;
+  new_member_fee: number;
+  existing_member_fee: number;
+  executive_fee: number;
+  requires_confirmation: boolean;
+  auto_apply: boolean;
+  action_id: string | null;
+  summary: {
+    total_members: number;
+    current_term: string;
+    new_member_count: number;
+    existing_member_count: number;
+    executive_count: number;
+    total_required_amount: number;
+    total_paid_amount: number;
+    created_count: number;
+    updated_count: number;
+    preserved_paid_count: number;
+  };
+  rows: MembershipFeePreviewRow[];
 };
 
 export async function previewPaymentMatching(
@@ -696,6 +800,15 @@ export async function upsertManualPaymentRecord(
 ): Promise<PaymentRecord> {
   return apiFetch<PaymentRecord>(`/api/payment-records/manual`, {
     method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function previewMembershipFees(
+  payload: MembershipFeePreviewPayload,
+): Promise<MembershipFeePreview> {
+  return apiFetch<MembershipFeePreview>("/api/payments/membership-fees/preview", {
+    method: "POST",
     body: JSON.stringify(payload),
   });
 }
@@ -864,8 +977,14 @@ export type AssistantIntent =
   | "payment_matching"
   | "activity_report_generate"
   | "activity_fee_generate"
+  | "payment_manual_update"
   | "activity_link"
   | "activity_create"
+  | "activity_create_with_roster"
+  | "activity_create_with_application_form"
+  | "activity_create_with_file"
+  | "google_form_import"
+  | "participant_import"
   | "unknown";
 
 export type AssistantResultType =
@@ -878,11 +997,17 @@ export type AssistantResultType =
   | "activity_candidate"
   | "activity_draft"
   | "activity_fee_generation_result"
+  | "payment_manual_update_result"
+  | "activity_import_result"
+  | "google_form_import_preview"
+  | "participant_import_preview"
+  | "bulk_membership_fee_mark_paid_preview"
+  | "activity_fee_transaction_match_preview"
   | "activity_linked_result"
   | "general_message"
   | "error";
 
-export type ActivityContextMode = "linked" | "candidate" | "create_draft" | "needs_confirmation" | "none";
+export type ActivityContextMode = "linked" | "current_activity" | "created" | "candidate" | "create_draft" | "needs_confirmation" | "none";
 
 export type ActivityContextInfo = {
   mode: ActivityContextMode;
@@ -922,12 +1047,33 @@ export type AssistantExecuteResponse = {
   activity_draft?: ActivityDraftInfo | null;
 };
 
+export type AssistantActionApplyResult = {
+  ok: boolean;
+  action_id: string;
+  action_type: string;
+  status: string;
+  activity_id: string | null;
+  result?: Record<string, unknown>;
+};
+
 export async function executeAssistant(
   formData: FormData,
 ): Promise<AssistantExecuteResponse> {
   return apiFetch<AssistantExecuteResponse>("/api/assistant/execute", {
     method: "POST",
     body: formData,
+  });
+}
+
+export async function confirmAssistantAction(actionId: string): Promise<AssistantActionApplyResult> {
+  return apiFetch<AssistantActionApplyResult>(`/api/assistant/actions/${actionId}/confirm`, {
+    method: "POST",
+  });
+}
+
+export async function cancelAssistantAction(actionId: string): Promise<AssistantActionApplyResult> {
+  return apiFetch<AssistantActionApplyResult>(`/api/assistant/actions/${actionId}/cancel`, {
+    method: "POST",
   });
 }
 
@@ -948,16 +1094,21 @@ export type ActivitySummary = {
   receipt_count: number;
   need_check_count: number;
   status: string;
+  deleted_at?: string | null;
   created_at: string | null;
   updated_at: string | null;
 };
 
 export type ActivityParticipantInfo = {
   id: string;
-  member_id: string;
+  member_id: string | null;
   name: string | null;
   student_id: string | null;
   department: string | null;
+  is_external?: boolean;
+  external_name?: string | null;
+  external_student_id?: string | null;
+  external_affiliation?: string | null;
   role: string | null;
 };
 
@@ -970,6 +1121,8 @@ export type ActivityFeeRecord = {
   paid_amount: number;
   status: string;
   period: string;
+  refund_status: string | null;
+  transaction_id: string | null;
 };
 
 export type ActivityFeeInfo = {
@@ -991,6 +1144,7 @@ export type ActivityReceiptInfo = {
   evidence_status: string;
   need_check: boolean;
   reason: string | null;
+  file_id?: string | null;
 };
 
 export type ActivityChecklist = {
@@ -1013,6 +1167,7 @@ export type ActivityDetail = {
     generated_content: string | null;
     final_content: string | null;
     status: string;
+    deleted_at?: string | null;
     created_at: string | null;
     updated_at: string | null;
   };
@@ -1074,6 +1229,10 @@ export async function archiveActivity(id: string): Promise<ActivitySummary> {
   return apiFetch<ActivitySummary>(`/api/activities/${id}`, { method: "DELETE" });
 }
 
+export async function deleteActivity(id: string): Promise<ActivitySummary> {
+  return archiveActivity(id);
+}
+
 export async function addActivityParticipant(
   activityId: string,
   memberId: string,
@@ -1098,21 +1257,178 @@ export async function removeActivityParticipant(
 export async function generateActivityFees(
   activityId: string,
   feeAmount: number,
-): Promise<{ ok: boolean; created: number; skipped: number; total: number; period_key: string }> {
+): Promise<{ ok: boolean; created: number; updated: number; skipped: number; total: number; period_key: string }> {
   return apiFetch(`/api/activities/${activityId}/activity-fees/generate`, {
     method: "POST",
     body: JSON.stringify({ fee_amount: feeAmount }),
   });
 }
 
+// Task 29: Activity-scoped fee matching (membership_fee is never touched)
+
+export type ActivityFeeMatchPreview = {
+  period: string;
+  payment_type: string;
+  activity_id: string;
+  matched_count: number;
+  need_check_count: number;
+  unpaid_count: number;
+  excluded_count: number;
+  matched_items: Array<{
+    transaction_id: string;
+    memo: string | null;
+    deposit_amount: number;
+    matched_member_id: string | null;
+    matched_member_name: string | null;
+    match_status: string;
+    score: number | null;
+    reason: string | null;
+  }>;
+  need_check_items: Array<{
+    transaction_id: string;
+    memo: string | null;
+    deposit_amount: number;
+    matched_member_id: string | null;
+    matched_member_name: string | null;
+    match_status: string;
+    score: number | null;
+    reason: string | null;
+  }>;
+  action_id: string;
+};
+
+export type ActivityFeeMatchApplyResult = {
+  ok: boolean;
+  activity_id: string;
+  period: string;
+  payment_type: string;
+  matched_count: number;
+  created_payment_records: number;
+  updated_payment_records: number;
+  updated_transactions: number;
+};
+
+export async function previewActivityFeeMatch(
+  activityId: string,
+  params?: { start_date?: string; end_date?: string },
+): Promise<ActivityFeeMatchPreview> {
+  return apiFetch<ActivityFeeMatchPreview>(
+    `/api/activities/${activityId}/activity-fees/match-preview`,
+    { method: "POST", body: JSON.stringify(params ?? {}) },
+  );
+}
+
+export async function applyActivityFeeMatch(
+  activityId: string,
+  params?: { start_date?: string; end_date?: string },
+): Promise<ActivityFeeMatchApplyResult> {
+  return apiFetch<ActivityFeeMatchApplyResult>(
+    `/api/activities/${activityId}/activity-fees/match-apply`,
+    { method: "POST", body: JSON.stringify(params ?? {}) },
+  );
+}
+
+// Task 30: Proposal-based activity fee transaction matching
+
+export type ActivityFeeMatchTransactionRow = {
+  transaction_id: string;
+  transaction_datetime: string | null;
+  memo: string | null;
+  deposit_amount: number;
+  matched_member_id: string | null;
+  matched_member_name: string | null;
+  payment_record_id: string | null;
+  required_amount: number | null;
+  amount_difference: number | null;
+  match_status: string; // auto_match_candidate | amount_mismatch | name_check_required | already_paid | already_matched | unmatched
+  score: number | null;
+  reason: string;
+};
+
+export type ActivityFeeMatchTransactionSummary = {
+  total_transactions: number;
+  auto_match_candidates: number;
+  amount_mismatch: number;
+  name_check_required: number;
+  already_paid: number;
+  already_matched: number;
+  unmatched: number;
+  excluded_transactions: number;
+};
+
+export type ActivityFeeMatchTransactionsPreview = {
+  activity_id: string;
+  requires_confirmation: boolean;
+  auto_apply: boolean;
+  summary: ActivityFeeMatchTransactionSummary;
+  rows: ActivityFeeMatchTransactionRow[];
+  confirm_payload: { action_id: string };
+};
+
+export type ActivityFeeMatchTransactionsConfirmResult = {
+  ok: boolean;
+  activity_id: string;
+  matched_count: number;
+  skipped_count: number;
+  updated_payment_records: number;
+  updated_transactions: number;
+};
+
+export async function previewActivityFeeMatchTransactions(
+  activityId: string,
+): Promise<ActivityFeeMatchTransactionsPreview> {
+  return apiFetch<ActivityFeeMatchTransactionsPreview>(
+    `/api/activities/${activityId}/activity-fees/match-transactions-preview`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export async function confirmActivityFeeMatchTransactions(
+  activityId: string,
+  actionId: string,
+  confirmedRowIds?: string[],
+): Promise<ActivityFeeMatchTransactionsConfirmResult> {
+  return apiFetch<ActivityFeeMatchTransactionsConfirmResult>(
+    `/api/activities/${activityId}/activity-fees/match-transactions-confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        action_id: actionId,
+        confirmed_row_ids: confirmedRowIds ?? null,
+      }),
+    },
+  );
+}
+
+export async function cancelActivityFeeMatchTransactions(
+  activityId: string,
+  actionId: string,
+): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(
+    `/api/activities/${activityId}/activity-fees/match-transactions-cancel`,
+    { method: "POST", body: JSON.stringify({ action_id: actionId }) },
+  );
+}
+
 export async function updateActivityFeeRecord(
   activityId: string,
   recordId: string,
-  payload: { paid_amount?: number; status?: string; required_amount?: number },
+  payload: { paid_amount?: number; status?: string; required_amount?: number; refund_status?: string },
 ): Promise<ActivityFeeRecord> {
   return apiFetch<ActivityFeeRecord>(
     `/api/activities/${activityId}/activity-fees/${recordId}`,
     { method: "PATCH", body: JSON.stringify(payload) },
+  );
+}
+
+export async function unmatchActivityFeeRecord(
+  activityId: string,
+  recordId: string,
+  keepPaidAmount: boolean = true,
+): Promise<{ ok: boolean; status: string; paid_amount: number; transaction_id: null }> {
+  return apiFetch(
+    `/api/activities/${activityId}/activity-fees/${recordId}/unmatch`,
+    { method: "POST", body: JSON.stringify({ keep_paid_amount: keepPaidAmount }) },
   );
 }
 
@@ -1137,6 +1453,15 @@ export type MemberSummaryDetail = {
     email: string | null;
     status: string;
     memo: string | null;
+    gender: string | null;
+    grade: string | null;
+    birth_year: number | null;
+    joined_term: string | null;
+    term_code: string | null;
+    is_executive: boolean;
+    role: string | null;
+    is_officer: boolean;
+    officer_role: "president" | "vice_president" | "officer" | null;
   };
   activities: Array<{
     id: string;
@@ -1182,4 +1507,773 @@ export async function getActivityFeePaymentRecords(params?: {
   if (params?.period) p.period = params.period;
   if (params?.member_id) p.member_id = params.member_id;
   return apiFetch<PaymentRecord[]>(`/api/payment-records${buildQuery(p)}`);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Task 18: Google Form Import types and API functions
+// ═══════════════════════════════════════════════════════════
+
+export type FormImportActivityContext = {
+  mode: string;
+  activity_id: string | null;
+  activity_title: string | null;
+};
+
+export type FormImportSummary = {
+  total_rows: number;
+  matched_members: number;
+  new_member_candidates: number;
+  needs_review: number;
+  existing_participants: number;
+  new_participants: number;
+};
+
+export type FormImportRow = {
+  row_index: number;
+  name: string | null;
+  student_id: string | null;
+  phone: string | null;
+  email: string | null;
+  department: string | null;
+  submitted_at: string | null;
+  member_match_status: string;
+  member_id: string | null;
+  participant_action: string;
+  participant_status: string;
+  raw_response: Record<string, unknown>;
+};
+
+export type FormImportPreview = {
+  import_id: string;
+  form_type: string;
+  confidence: number;
+  matched_columns: string[];
+  activity_context: FormImportActivityContext;
+  summary: FormImportSummary;
+  rows: FormImportRow[];
+  requires_confirmation: boolean;
+};
+
+export type FormImportApplyPayload = {
+  import_id?: string | null;
+  activity_id: string;
+  form_type: string;
+  rows: FormImportRow[];
+};
+
+export type FormImportApplyResult = {
+  ok: boolean;
+  activity_id: string;
+  form_type: string;
+  created_members: number;
+  updated_members: number;
+  created_participants: number;
+  updated_participants: number;
+  saved_feedbacks: number;
+};
+
+export async function previewFormImport(
+  file: File,
+  activityId?: string | null,
+  formStage?: string,
+): Promise<FormImportPreview> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (activityId) formData.append("activity_id", activityId);
+  if (formStage) formData.append("form_stage", formStage);
+  return apiFetch<FormImportPreview>("/api/activity-form-imports/preview", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function applyFormImport(
+  payload: FormImportApplyPayload,
+): Promise<FormImportApplyResult> {
+  return apiFetch<FormImportApplyResult>("/api/activity-form-imports/apply", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// Task 19: File Vault types and API functions
+// ═══════════════════════════════════════════════════════════
+
+export type ActivityFile = {
+  id: string;
+  activity_report_id: string | null;
+  original_filename: string;
+  stored_filename: string | null;
+  mime_type: string | null;
+  file_ext: string | null;
+  size_bytes: number | null;
+  file_type: string | null;
+  file_category: string | null;
+  file_role: string | null;
+  is_submission_file: boolean;
+  submission_month: string | null;
+  version: number;
+  preview_status: string | null;
+  preview_available: boolean;
+  preview_metadata: Record<string, unknown> | null;
+  related_entity_type: string | null;
+  related_entity_id: string | null;
+  deleted_at: string | null;
+  created_at: string | null;
+  download_url: string;
+};
+
+export type ExcelSheetPreview = {
+  name: string;
+  headers: string[];
+  rows: string[][];
+};
+
+export type FilePreviewResult =
+  | { type: "pdf"; preview_url: string }
+  | { type: "image"; preview_url: string }
+  | { type: "excel"; sheets: ExcelSheetPreview[] }
+  | { type: "zip"; files: Array<{ filename: string; size_bytes: number }> }
+  | { type: "hwp"; ext: string; size_bytes: number | null; message: string; download_url: string; doc_title?: string }
+  | { type: "unsupported"; message: string }
+  | { type: "error"; message: string };
+
+export type SubmissionPackagePreview = {
+  month: string;
+  activities: Array<{
+    activity_id: string;
+    title: string;
+    activity_date: string | null;
+    submission_files: Array<{
+      id: string;
+      filename: string;
+      category: string | null;
+      role: string | null;
+      size_bytes: number | null;
+    }>;
+    missing_items: string[];
+  }>;
+  summary: {
+    activity_count: number;
+    submission_file_count: number;
+    missing_count: number;
+  };
+};
+
+export type SubmissionPackageGeneratePayload = {
+  month: string;
+  include_categories?: string[];
+};
+
+export type SubmissionPackageGenerateResult = {
+  ok: boolean;
+  package_file_id: string;
+  month: string;
+  file_count: number;
+  download_url: string;
+};
+
+export async function getActivityFiles(
+  activityId: string,
+  params?: { category?: string; role?: string; include_deleted?: boolean },
+): Promise<ActivityFile[]> {
+  const p: Record<string, string | undefined> = {};
+  if (params?.category) p.category = params.category;
+  if (params?.role) p.role = params.role;
+  if (params?.include_deleted !== undefined) p.include_deleted = String(params.include_deleted);
+  return apiFetch<ActivityFile[]>(`/api/activities/${activityId}/files${buildQuery(p)}`);
+}
+
+export async function uploadActivityFile(
+  activityId: string,
+  file: File,
+  options?: {
+    file_category?: string;
+    file_role?: string;
+    is_submission_file?: boolean;
+    submission_month?: string;
+  },
+): Promise<ActivityFile> {
+  const fd = new FormData();
+  fd.append("file", file);
+  if (options?.file_category) fd.append("file_category", options.file_category);
+  if (options?.file_role) fd.append("file_role", options.file_role);
+  if (options?.is_submission_file !== undefined)
+    fd.append("is_submission_file", String(options.is_submission_file));
+  if (options?.submission_month) fd.append("submission_month", options.submission_month);
+  return apiFetch<ActivityFile>(`/api/activities/${activityId}/files`, {
+    method: "POST",
+    body: fd,
+  });
+}
+
+export async function getFileDetail(fileId: string): Promise<ActivityFile> {
+  return apiFetch<ActivityFile>(`/api/files/${fileId}`);
+}
+
+export async function getFilePreview(fileId: string): Promise<FilePreviewResult> {
+  return apiFetch<FilePreviewResult>(`/api/files/${fileId}/preview`);
+}
+
+export async function softDeleteFile(fileId: string): Promise<{ ok: boolean; deleted_id: string }> {
+  return apiFetch(`/api/files/${fileId}`, { method: "DELETE" });
+}
+
+export async function patchFileActivity(
+  fileId: string,
+  activityId: string | null,
+): Promise<ActivityFile> {
+  return apiFetch<ActivityFile>(`/api/files/${fileId}/activity`, {
+    method: "PATCH",
+    body: JSON.stringify({ activity_id: activityId }),
+  });
+}
+
+export async function patchFileSubmission(
+  fileId: string,
+  payload: {
+    is_submission_file?: boolean;
+    submission_month?: string;
+    file_category?: string;
+    file_role?: string;
+  },
+): Promise<ActivityFile> {
+  return apiFetch<ActivityFile>(`/api/files/${fileId}/submission`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getSubmissionPackagePreview(month: string): Promise<SubmissionPackagePreview> {
+  return apiFetch<SubmissionPackagePreview>(`/api/submission-packages/preview?month=${encodeURIComponent(month)}`);
+}
+
+export async function generateSubmissionPackage(
+  payload: SubmissionPackageGeneratePayload,
+): Promise<SubmissionPackageGenerateResult> {
+  return apiFetch<SubmissionPackageGenerateResult>("/api/submission-packages/generate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// Task 20: Document Template and HWPX generation types/API
+// ═══════════════════════════════════════════════════════════
+
+export type DocumentTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  template_type: string;
+  is_default: boolean;
+  placeholder_fields: string[];
+  original_filename: string;
+  file_ext: string | null;
+  size_bytes: number | null;
+  created_at: string | null;
+  download_url: string;
+};
+
+export type DocumentFieldMapping = {
+  source: string;
+  target: string;
+  field: string;
+};
+
+export type DocumentPreviewResult = {
+  activity_id: string;
+  template_id: string;
+  mode: "placeholder" | "legacy_form" | "mixed";
+  mappings: DocumentFieldMapping[];
+  mapped_fields: Record<string, string>;
+  missing_fields: string[];
+  warnings: string[];
+  content_preview: {
+    title: string;
+    body: string;
+  };
+};
+
+export type DocumentGeneratePayload = {
+  template_id: string;
+  document_title?: string;
+  overrides?: Record<string, string>;
+  mark_as_submission?: boolean;
+  submission_month?: string;
+};
+
+export type DocumentGenerateResult = {
+  ok: boolean;
+  file_id?: string;
+  generated_file_id: string;
+  download_url: string;
+  missing_fields: string[];
+  activity_id: string;
+  mode?: string;
+  replaced_count?: number;
+  participant_count?: number;
+  warnings?: string[];
+};
+
+export type GeneratedDocument = {
+  id: string;
+  file_id: string;
+  template_name: string;
+  title: string;
+  document_title: string;
+  missing_fields: string[];
+  is_submission_file: boolean;
+  submission_month: string | null;
+  created_at: string | null;
+  download_url: string;
+};
+
+export async function getDocumentTemplates(params?: {
+  template_type?: string;
+}): Promise<DocumentTemplate[]> {
+  return apiFetch<DocumentTemplate[]>(
+    `/api/document-templates${buildQuery(params ?? {})}`,
+  );
+}
+
+export async function uploadDocumentTemplate(
+  file: File,
+  options?: {
+    name?: string;
+    description?: string;
+    template_type?: string;
+    is_default?: boolean;
+  },
+): Promise<DocumentTemplate> {
+  const fd = new FormData();
+  fd.append("file", file);
+  if (options?.name) fd.append("name", options.name);
+  if (options?.description) fd.append("description", options.description);
+  if (options?.template_type) fd.append("template_type", options.template_type);
+  if (options?.is_default !== undefined) fd.append("is_default", String(options.is_default));
+  return apiFetch<DocumentTemplate>("/api/document-templates", {
+    method: "POST",
+    body: fd,
+  });
+}
+
+export async function getTemplateFields(templateId: string): Promise<{
+  template_id: string;
+  name: string;
+  fields: string[];
+  ext: string | null;
+}> {
+  return apiFetch(`/api/document-templates/${templateId}/fields`);
+}
+
+export async function previewDocument(
+  activityId: string,
+  payload: DocumentGeneratePayload,
+): Promise<DocumentPreviewResult> {
+  return apiFetch<DocumentPreviewResult>(
+    `/api/activities/${activityId}/documents/preview`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export async function generateDocument(
+  activityId: string,
+  payload: DocumentGeneratePayload,
+): Promise<DocumentGenerateResult> {
+  return apiFetch<DocumentGenerateResult>(
+    `/api/activities/${activityId}/documents/generate`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export async function getActivityDocuments(activityId: string): Promise<GeneratedDocument[]> {
+  return apiFetch<GeneratedDocument[]>(`/api/activities/${activityId}/documents`);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Task 21: Settlement and refund management types/API
+// ═══════════════════════════════════════════════════════════
+
+export type SettlementSummary = {
+  total_records: number;
+  paid_count: number;
+  unpaid_count: number;
+  partial_count: number;
+  overpaid_count: number;
+  refund_required_count: number;
+  refunded_count: number;
+  need_check_count: number;
+  cancelled_count: number;
+  total_required_amount: number;
+  total_paid_amount: number;
+  total_overpaid_amount: number;
+  total_refund_required_amount: number;
+};
+
+export type RefundRecord = {
+  payment_record_id: string;
+  member_id: string | null;
+  member_name: string | null;
+  student_id: string | null;
+  activity_id: string | null;
+  activity_title: string | null;
+  participant_status: string | null;
+  required_amount: number;
+  paid_amount: number;
+  overpaid_amount: number;
+  refund_amount: number | null;
+  refund_status: string;
+  refund_reason: string | null;
+  status: string;
+  refunded_at: string | null;
+};
+
+export type AdjustmentLog = {
+  id: string;
+  action: string;
+  previous_status: string | null;
+  new_status: string | null;
+  previous_paid_amount: number | null;
+  new_paid_amount: number | null;
+  refund_amount: number | null;
+  reason: string | null;
+  created_at: string | null;
+};
+
+export async function getSettlementSummary(params?: {
+  activity_id?: string;
+  period?: string;
+  payment_type?: string;
+}): Promise<SettlementSummary> {
+  return apiFetch<SettlementSummary>(`/api/settlements/summary${buildQuery(params ?? {})}`);
+}
+
+export async function getRefundRecords(params?: {
+  activity_id?: string;
+  refund_status?: string;
+}): Promise<RefundRecord[]> {
+  return apiFetch<RefundRecord[]>(`/api/settlements/refunds${buildQuery(params ?? {})}`);
+}
+
+export async function setRefundRequired(
+  paymentRecordId: string,
+  payload: { refund_amount?: number; reason?: string },
+): Promise<{ ok: boolean; payment_record_id: string; refund_status: string }> {
+  return apiFetch(`/api/payment-records/${paymentRecordId}/refund-required`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function setRefundPending(
+  paymentRecordId: string,
+  payload: { refund_amount?: number; reason?: string },
+): Promise<{ ok: boolean; payment_record_id: string; refund_status: string }> {
+  return apiFetch(`/api/payment-records/${paymentRecordId}/refund-pending`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function setMarkRefunded(
+  paymentRecordId: string,
+  payload: { refund_transaction_id?: string; refund_amount?: number; reason?: string },
+): Promise<{ ok: boolean; payment_record_id: string; refund_status: string; status: string }> {
+  return apiFetch(`/api/payment-records/${paymentRecordId}/mark-refunded`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function setRefundCancel(
+  paymentRecordId: string,
+  payload: { reason?: string },
+): Promise<{ ok: boolean; payment_record_id: string; refund_status: string; status: string }> {
+  return apiFetch(`/api/payment-records/${paymentRecordId}/refund-cancel`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getAdjustmentLogs(paymentRecordId: string): Promise<AdjustmentLog[]> {
+  return apiFetch<AdjustmentLog[]>(`/api/payment-records/${paymentRecordId}/adjustment-logs`);
+}
+
+export async function matchRefundTransaction(
+  transactionId: string,
+  payload: { payment_record_id: string; refund_amount?: number },
+): Promise<{ ok: boolean; transaction_id: string; payment_record_id: string; refund_status: string }> {
+  return apiFetch(`/api/transactions/${transactionId}/match-refund`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function unmatchRefundTransaction(
+  transactionId: string,
+): Promise<{ ok: boolean; transaction_id: string; match_status: string; unmatched_refunds: number }> {
+  return apiFetch(`/api/transactions/${transactionId}/unmatch-refund`, {
+    method: "POST",
+  });
+}
+
+// Task 18: Unmatch APIs
+export async function unmatchPaymentRecord(
+  paymentRecordId: string,
+): Promise<{ ok: boolean; payment_record_id: string; status: string; paid_amount: number }> {
+  return apiFetch(`/api/payment-records/${paymentRecordId}/unmatch`, {
+    method: "POST",
+  });
+}
+
+export async function unmatchTransaction(
+  transactionId: string,
+): Promise<{ ok: boolean; transaction_id: string; match_status: string; unmatched_records: number }> {
+  return apiFetch(`/api/transactions/${transactionId}/unmatch`, {
+    method: "POST",
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// Task 26: Member import, merge, deactivate/restore
+// ═══════════════════════════════════════════════════════════
+
+export type MemberImportRowOut = {
+  row_index: number;
+  name: string | null;
+  student_id: string | null;
+  department: string | null;
+  phone: string | null;
+  email: string | null;
+  // Oui Parfum extended fields
+  gender: string | null;
+  grade: string | null;
+  birth_year: number | null;
+  joined_term: string | null;
+  term_code: string | null;
+  is_executive: boolean;
+  role: string | null;
+  is_officer: boolean;
+  officer_role: "president" | "vice_president" | "officer" | null;
+  action: "new_member" | "update_existing" | "duplicate_candidate" | "needs_review" | "invalid";
+  matched_member_id: string | null;
+  diff: Record<string, { old: string; new: string }>;
+  reason: string;
+  available_actions: string[];
+};
+
+export type MemberImportSummaryOut = {
+  total_rows: number;
+  new_members: number;
+  updates: number;
+  duplicate_candidates: number;
+  needs_review: number;
+  invalid_rows: number;
+};
+
+export type MemberImportPreviewOut = {
+  requires_confirmation: boolean;
+  auto_apply: boolean;
+  summary: MemberImportSummaryOut;
+  rows: MemberImportRowOut[];
+  action_id: string | null;
+};
+
+export type DuplicateGroup = {
+  reason: string;
+  members: Array<{
+    id: string;
+    name: string;
+    student_id: string | null;
+    phone: string | null;
+    department: string | null;
+    status: string;
+    created_at: string | null;
+  }>;
+};
+
+export async function previewMemberImport(file: File): Promise<MemberImportPreviewOut> {
+  const fd = new FormData();
+  fd.append("file", file);
+  return apiFetch<MemberImportPreviewOut>("/api/members/import/preview", {
+    method: "POST",
+    body: fd,
+  });
+}
+
+export async function getDuplicateMembers(): Promise<DuplicateGroup[]> {
+  return apiFetch<DuplicateGroup[]>("/api/members/duplicates");
+}
+
+export async function mergeMembers(
+  primaryId: string,
+  duplicateId: string,
+): Promise<{ ok: boolean; primary_id: string; duplicate_id: string; moved_participants: number; moved_payment_records: number }> {
+  return apiFetch(`/api/members/merge`, {
+    method: "POST",
+    body: JSON.stringify({ primary_id: primaryId, duplicate_id: duplicateId }),
+  });
+}
+
+export async function deactivateMember(id: string): Promise<Member> {
+  return apiFetch<Member>(`/api/members/${id}/deactivate`, { method: "POST" });
+}
+
+export async function restoreMember(id: string): Promise<Member> {
+  return apiFetch<Member>(`/api/members/${id}/restore`, { method: "POST" });
+}
+
+// ═══════════════════════════════════════════════════════════
+// Task 27: Activity Participant Import types and API functions
+// ═══════════════════════════════════════════════════════════
+
+export type ParticipantImportPreviewRow = {
+  row_index: number;
+  name: string | null;
+  student_id: string | null;
+  department: string | null;
+  phone: string | null;
+  match_status: string; // matched_member | needs_review | duplicate_candidate | unregistered_candidate | already_participant
+  matched_member_id: string | null;
+  matched_member_name: string | null;
+  participant_status: string; // will_create | will_update | already_participant | needs_review | invalid
+  action: string;
+  available_actions: string[];
+  reason: string;
+  selected_action: string | null;
+};
+
+export type ParticipantImportSummary = {
+  total_rows: number;
+  matched_members: number;
+  unregistered_candidates: number;
+  duplicate_candidates: number;
+  needs_review: number;
+  invalid_rows: number;
+  already_participants: number;
+  will_create_participants: number;
+  will_update_participants: number;
+};
+
+export type ParticipantImportPreview = {
+  requires_confirmation: boolean;
+  auto_apply: boolean;
+  activity_id: string;
+  summary: ParticipantImportSummary;
+  rows: ParticipantImportPreviewRow[];
+  confirm_payload: { action_id: string };
+};
+
+export type ParticipantImportRowOverride = {
+  row_index: number;
+  selected_action: string;
+  matched_member_id?: string | null;
+};
+
+export type ParticipantImportConfirmPayload = {
+  action_id: string;
+  row_overrides?: ParticipantImportRowOverride[];
+};
+
+export type ParticipantImportConfirmResult = {
+  ok: boolean;
+  activity_id: string;
+  result: {
+    created_participants: number;
+    updated_participants: number;
+    already_participants: number;
+    external_participants: number;
+    ignored_rows: number;
+    created_members: number;
+  };
+};
+
+export async function previewParticipantImport(
+  activityId: string,
+  file: File,
+): Promise<ParticipantImportPreview> {
+  const fd = new FormData();
+  fd.append("file", file);
+  return apiFetch<ParticipantImportPreview>(
+    `/api/activities/${activityId}/participants/import/preview`,
+    { method: "POST", body: fd },
+  );
+}
+
+export async function confirmParticipantImport(
+  activityId: string,
+  payload: ParticipantImportConfirmPayload,
+): Promise<ParticipantImportConfirmResult> {
+  return apiFetch<ParticipantImportConfirmResult>(
+    `/api/activities/${activityId}/participants/import/confirm`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export async function cancelParticipantImport(
+  activityId: string,
+  actionId: string,
+): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(
+    `/api/activities/${activityId}/participants/import/cancel`,
+    { method: "POST", body: JSON.stringify({ action_id: actionId }) },
+  );
+}
+
+// ─── Activity Fee Transaction Exclusion (Task 32) ─────────────────────────────
+
+export type TransactionExclusionResult = {
+  ok: boolean;
+  id?: string;
+  transaction_id: string;
+  activity_id: string;
+  payment_type: string;
+  is_active: boolean;
+  created?: boolean;
+};
+
+export type ExcludedTransactionItem = {
+  exclusion_id: string;
+  transaction_id: string;
+  activity_id: string;
+  payment_type: string;
+  reason: string | null;
+  created_at: string | null;
+  transaction: {
+    id: string;
+    memo: string | null;
+    deposit_amount: number;
+    transaction_datetime: string | null;
+  } | null;
+};
+
+export async function excludeActivityFeeTransaction(
+  activityId: string,
+  transactionId: string,
+  reason?: string,
+): Promise<TransactionExclusionResult> {
+  return apiFetch<TransactionExclusionResult>(
+    `/api/activities/${activityId}/activity-fees/transactions/${transactionId}/exclude`,
+    { method: "POST", body: JSON.stringify({ reason: reason ?? null }) },
+  );
+}
+
+export async function includeActivityFeeTransaction(
+  activityId: string,
+  transactionId: string,
+): Promise<TransactionExclusionResult> {
+  return apiFetch<TransactionExclusionResult>(
+    `/api/activities/${activityId}/activity-fees/transactions/${transactionId}/include`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export async function getExcludedActivityFeeTransactions(
+  activityId: string,
+): Promise<ExcludedTransactionItem[]> {
+  return apiFetch<ExcludedTransactionItem[]>(
+    `/api/activities/${activityId}/activity-fees/excluded-transactions`,
+  );
 }

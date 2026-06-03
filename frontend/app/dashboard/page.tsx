@@ -39,10 +39,17 @@ const TODAY_ITEMS = [
     urgent: (v: number) => v > 0,
   },
   {
-    key: "unpaid_count" as keyof DashboardSummary,
-    label: "미납자",
-    href: "/payments",
+    key: "unpaid_membership_fee_count" as keyof DashboardSummary,
+    label: "회비 미납",
+    href: "/payments?tab=membership_fee",
     icon: CreditCard,
+    urgent: (v: number) => v > 0,
+  },
+  {
+    key: "unpaid_activity_fee_count" as keyof DashboardSummary,
+    label: "활동비 미납 건",
+    href: "/payments?tab=activity_fee",
+    icon: WalletCards,
     urgent: (v: number) => v > 0,
   },
   {
@@ -189,7 +196,7 @@ export default function DashboardPage() {
           <h2 className="text-sm font-semibold mb-3" style={{ color: "var(--text-main)" }}>
             오늘 처리할 일
           </h2>
-          <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             {TODAY_ITEMS.map((item) => {
               const Icon = item.icon;
               const raw = summary ? (summary[item.key] as number) : undefined;

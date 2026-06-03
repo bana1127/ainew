@@ -38,6 +38,33 @@ function statusLabel(status: string): string {
   return map[status] ?? status;
 }
 
+type OfficerRole = "president" | "vice_president" | "officer";
+
+const ROLE_BADGE_STYLE: Record<OfficerRole, { label: string; bg: string; color: string }> = {
+  president: { label: "회장", bg: "#7C6CF233", color: "var(--primary)" },
+  vice_president: { label: "부회장", bg: "#3F7D5833", color: "var(--success)" },
+  officer: { label: "임원", bg: "#5A7FAA33", color: "#5A7FAA" },
+};
+
+function normalizeOfficerRole(member: { is_officer?: boolean; is_executive?: boolean; officer_role?: OfficerRole | null; role?: string | null }): OfficerRole | null {
+  if (member.officer_role) return member.officer_role;
+  if (member.role === "회장" || member.role === "president") return "president";
+  if (member.role === "부회장" || member.role === "vice_president") return "vice_president";
+  if (member.is_officer || member.is_executive || member.role) return "officer";
+  return null;
+}
+
+function RoleBadge({ role }: { role: OfficerRole | null }) {
+  if (!role) return null;
+  const style = ROLE_BADGE_STYLE[role];
+  return (
+    <span className="px-2 py-0.5 rounded text-xs font-semibold"
+      style={{ background: style.bg, color: style.color }}>
+      {style.label}
+    </span>
+  );
+}
+
 export default function MemberDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -70,6 +97,7 @@ export default function MemberDetailPage() {
   const { member, activities, membership_payments, activity_fee_payments, summary } = data;
   const unpaidMembership = membership_payments.filter((p) => p.status === "unpaid").length;
   const unpaidActivityFee = activity_fee_payments.filter((p) => p.status === "unpaid").length;
+  const officerRole = normalizeOfficerRole(member);
 
   return (
     <AppShell>
@@ -92,6 +120,7 @@ export default function MemberDetailPage() {
                 <h1 className="text-xl font-semibold" style={{ color: "var(--text-main)" }}>
                   {member.name}
                 </h1>
+                <RoleBadge role={officerRole} />
                 <StatusBadge status={member.status} />
               </div>
               <div className="space-y-1">
@@ -103,6 +132,7 @@ export default function MemberDetailPage() {
                 {member.department && (
                   <p className="text-sm" style={{ color: "var(--text-muted)" }}>
                     학과: {member.department}
+                    {member.grade && ` · ${member.grade}`}
                   </p>
                 )}
                 {member.phone && (
@@ -115,6 +145,19 @@ export default function MemberDetailPage() {
                     이메일: {member.email}
                   </p>
                 )}
+                {member.joined_term && (
+                  <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                    가입 시기: {member.joined_term}
+                  </p>
+                )}
+                {member.birth_year && (
+                  <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                    출생년도: {member.birth_year}
+                  </p>
+                )}
+                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                  직위: {officerRole ? ROLE_BADGE_STYLE[officerRole].label : "일반 부원"}
+                </p>
                 {member.memo && (
                   <p className="text-sm mt-2" style={{ color: "var(--text-muted)" }}>
                     메모: {member.memo}
@@ -374,27 +417,41 @@ export default function MemberDetailPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr style={{ background: "var(--surface-soft)", borderBottom: "1px solid var(--border-soft)" }}>
-                      {["활동 기간", "필요 금액", "납부 금액", "상태"].map((h) => (
-                        <th key={h} className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide"
+                      {["활동 기간", "필요", "납부", "오납", "환불 상태", "환불 금액", "상태"].map((h) => (
+                        <th key={h} className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide"
                           style={{ color: "var(--text-muted)" }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {activity_fee_payments.map((p) => (
+                    {activity_fee_payments.map((p) => {
+                      const overpaid = Math.max(0, (p.paid_amount || 0) - (p.required_amount || 0));
+                      const refundStatus = (p as Record<string, unknown>).refund_status as string | undefined;
+                      const refundAmt = (p as Record<string, unknown>).refund_amount as number | undefined;
+                      return (
                       <tr key={p.id} style={{ borderBottom: "1px solid var(--border-soft)" }}
                         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
                         onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                        <td className="px-4 py-3" style={{ color: "var(--text-main)" }}>{p.period}</td>
-                        <td className="px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>
-                          {fmt(p.required_amount)}원
+                        <td className="px-3 py-3" style={{ color: "var(--text-main)" }}>{p.period}</td>
+                        <td className="px-3 py-3 text-right text-xs" style={{ color: "var(--text-main)" }}>
+                          {fmt(p.required_amount)}
                         </td>
-                        <td className="px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>
-                          {fmt(p.paid_amount)}원
+                        <td className="px-3 py-3 text-right text-xs" style={{ color: "var(--text-main)" }}>
+                          {fmt(p.paid_amount)}
                         </td>
-                        <td className="px-4 py-3"><StatusBadge status={p.status} /></td>
+                        <td className="px-3 py-3 text-right text-xs" style={{ color: overpaid > 0 ? "var(--danger)" : "var(--text-muted)" }}>
+                          {overpaid > 0 ? `+${fmt(overpaid)}` : "-"}
+                        </td>
+                        <td className="px-3 py-3 text-xs" style={{ color: refundStatus === "refund_required" ? "var(--danger)" : refundStatus === "refunded" ? "var(--success)" : "var(--text-muted)" }}>
+                          {refundStatus && refundStatus !== "none" ? { refund_required: "환불필요", refund_pending: "환불대기", refunded: "환불완료" }[refundStatus] ?? refundStatus : "-"}
+                        </td>
+                        <td className="px-3 py-3 text-right text-xs" style={{ color: "var(--text-main)" }}>
+                          {refundAmt ? `${fmt(refundAmt)}원` : "-"}
+                        </td>
+                        <td className="px-3 py-3"><StatusBadge status={p.status} /></td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

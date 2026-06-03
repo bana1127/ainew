@@ -28,14 +28,16 @@ import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   type ActivityDetail,
-  type ActivityFeeRecord,
   type ActivityParticipantInfo,
   type Member,
   type Receipt,
   type AssistantExecuteResponse,
   type ActivityDraftInfo,
+  type ActivityFile,
+  type FilePreviewResult,
+  type SubmissionPackagePreview,
   addActivityParticipant,
-  generateActivityFees,
+  deleteActivity,
   getActivityDetail,
   getActivityCategoriesTyped,
   getMembersFiltered,
@@ -43,31 +45,57 @@ import {
   linkReceiptToActivity,
   removeActivityParticipant,
   updateActivity,
-  updateActivityFeeRecord,
   updateActivityReport,
   generateActivityReportDraft,
   executeAssistant,
   type ActivityReportGenerateRequest,
   type ActivityCategory,
+  type FormImportPreview,
+  type FormImportRow,
+  previewFormImport,
+  applyFormImport,
+  getActivityFiles,
+  uploadActivityFile,
+  getFilePreview,
+  softDeleteFile,
+  patchFileSubmission,
+  getSubmissionPackagePreview,
+  generateSubmissionPackage,
+  type DocumentTemplate,
+  type DocumentPreviewResult,
+  type GeneratedDocument,
+  getDocumentTemplates,
+  uploadDocumentTemplate,
+  previewDocument,
+  generateDocument,
+  getActivityDocuments,
+  confirmAssistantAction,
+  cancelAssistantAction,
+  previewParticipantImport,
+  confirmParticipantImport,
+  cancelParticipantImport,
 } from "@/lib/api";
 import { AssistantResultCard } from "@/components/assistant/AssistantResultCard";
+import { ActivityFeeTab } from "@/components/activity/ActivityFeeTab";
 import { nanoid } from "nanoid";
 
-type TabKey = "overview" | "participants" | "report" | "fees" | "receipts" | "attachments" | "ai";
+type TabKey = "ai" | "overview" | "participants" | "report" | "fees" | "receipts" | "files" | "import";
 
 const TABS: { key: TabKey; label: string }[] = [
+  { key: "ai", label: "AI 작업" },
   { key: "overview", label: "개요" },
   { key: "participants", label: "참여자" },
   { key: "report", label: "보고서" },
   { key: "fees", label: "활동비" },
   { key: "receipts", label: "증빙" },
-  { key: "attachments", label: "첨부" },
-  { key: "ai", label: "AI 작업" },
+  { key: "files", label: "파일함" },
+  { key: "import", label: "명단" },
 ];
 
 function fmt(n: number): string {
   return n.toLocaleString("ko-KR");
 }
+
 
 function statusLabel(status: string): string {
   const map: Record<string, string> = {
@@ -337,7 +365,11 @@ function ParticipantsTab({
     }
   }, [showAdd]);
 
-  const participantMemberIds = new Set(participants.map((p) => p.member_id));
+  const participantMemberIds = new Set(
+    participants
+      .map((p) => p.member_id)
+      .filter((memberId): memberId is string => Boolean(memberId)),
+  );
   const availableMembers = allMembers.filter((m) => !participantMemberIds.has(m.id));
 
   async function handleAdd() {
@@ -422,22 +454,30 @@ function ParticipantsTab({
                     onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                   >
                     <td className="px-4 py-3 font-medium" style={{ color: "var(--text-main)" }}>
-                      <Link href={`/members/${p.member_id}`} className="hover:underline">
-                        {p.name ?? "-"}
-                      </Link>
+                      {p.member_id ? (
+                        <Link href={`/members/${p.member_id}`} className="hover:underline">
+                          {p.name ?? "-"}
+                        </Link>
+                      ) : (
+                        <span>{p.name ?? "-"}</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{p.student_id ?? "-"}</td>
                     <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{p.department ?? "-"}</td>
                     <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{p.role ?? "participant"}</td>
                     <td className="px-4 py-3">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => handleRemove(p.member_id)}
-                        disabled={removing === p.member_id}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                      {p.member_id ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => handleRemove(p.member_id!)}
+                          disabled={removing === p.member_id}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      ) : (
+                        <span className="text-xs" style={{ color: "var(--text-muted)" }}>외부</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -449,23 +489,33 @@ function ParticipantsTab({
             {participants.map((p) => (
               <div key={p.id} className="p-4 flex items-center justify-between">
                 <div>
-                  <Link href={`/members/${p.member_id}`}>
-                    <p className="font-medium text-sm hover:underline" style={{ color: "var(--text-main)" }}>
+                  {p.member_id ? (
+                    <Link href={`/members/${p.member_id}`}>
+                      <p className="font-medium text-sm hover:underline" style={{ color: "var(--text-main)" }}>
+                        {p.name ?? "-"}
+                      </p>
+                    </Link>
+                  ) : (
+                    <p className="font-medium text-sm" style={{ color: "var(--text-main)" }}>
                       {p.name ?? "-"}
                     </p>
-                  </Link>
+                  )}
                   <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
                     {p.student_id ?? ""} {p.department ? `· ${p.department}` : ""}
                   </p>
                 </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => handleRemove(p.member_id)}
-                  disabled={removing === p.member_id}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </Button>
+                {p.member_id ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleRemove(p.member_id!)}
+                    disabled={removing === p.member_id}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                ) : (
+                  <span className="text-xs" style={{ color: "var(--text-muted)" }}>외부</span>
+                )}
               </div>
             ))}
           </div>
@@ -528,6 +578,7 @@ function ReportTab({
   const [editContent, setEditContent] = useState(content);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveOk, setSaveOk] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
@@ -548,7 +599,9 @@ function ReportTab({
         activity_date: activity.activity_date,
         location: activity.location,
         input_text: activity.input_text,
-        participant_ids: detail.participants.map((p) => p.member_id),
+        participant_ids: detail.participants
+          .map((p) => p.member_id)
+          .filter((memberId): memberId is string => Boolean(memberId)),
         save_to_db: true,
       };
       await generateActivityReportDraft(req);
@@ -563,9 +616,12 @@ function ReportTab({
   async function handleSaveContent() {
     setSaving(true);
     setSaveError(null);
+    setSaveOk(false);
     try {
       await updateActivityReport(activityId, { final_content: editContent });
       setEditing(false);
+      setSaveOk(true);
+      setTimeout(() => setSaveOk(false), 3000);
       onUpdated();
     } catch (err: unknown) {
       setSaveError(err instanceof Error ? err.message : "저장에 실패했습니다.");
@@ -611,7 +667,15 @@ function ReportTab({
     <Card padding="lg">
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-sm font-semibold" style={{ color: "var(--text-main)" }}>활동 보고서</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold" style={{ color: "var(--text-main)" }}>활동 보고서</h3>
+            {saveOk && (
+              <span className="text-xs rounded-full px-2 py-0.5"
+                style={{ background: "var(--success-soft)", color: "var(--success)" }}>
+                저장 완료
+              </span>
+            )}
+          </div>
           <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
             상태: {statusLabel(activity.status)}
           </p>
@@ -701,231 +765,381 @@ function ReportTab({
           </div>
         </>
       )}
+
+      {/* Document generation section */}
+      <DocumentGenerationSection
+        activityId={activityId}
+        reportContent={content}
+        onUpdated={onUpdated}
+      />
     </Card>
   );
 }
 
-// ─── Activity Fees Tab ────────────────────────────────────────────────────────
+// ─── Document Generation Section (Task 20) ───────────────────────────────────
 
-function FeesTab({
+const TEMPLATE_TYPE_LABEL: Record<string, string> = {
+  activity_report: "활동 내역서",
+  activity_plan: "활동 기획서",
+  meeting_report: "회의록",
+  mentoring_report: "멘토링 보고서",
+  project_report: "프로젝트 보고서",
+  exchange_activity: "교류 활동",
+  other: "기타",
+};
+
+function DocumentGenerationSection({
   activityId,
-  feeInfo,
+  reportContent,
   onUpdated,
 }: {
   activityId: string;
-  feeInfo: ActivityDetail["activity_fee"];
+  reportContent: string;
   onUpdated: () => void;
 }) {
-  const [feeAmount, setFeeAmount] = useState(feeInfo.amount || 10000);
-  const [generating, setGenerating] = useState(false);
-  const [genResult, setGenResult] = useState<string | null>(null);
-  const [genError, setGenError] = useState<string | null>(null);
-  const [editingRecord, setEditingRecord] = useState<ActivityFeeRecord | null>(null);
-  const [editPaid, setEditPaid] = useState(0);
-  const [editStatus, setEditStatus] = useState("unpaid");
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const tplFileRef = React.useRef<HTMLInputElement>(null);
+  const [templates, setTemplates] = React.useState<DocumentTemplate[]>([]);
+  const [loadingTemplates, setLoadingTemplates] = React.useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = React.useState("");
+  const [preview, setPreview] = React.useState<DocumentPreviewResult | null>(null);
+  const [previewing, setPreviewing] = React.useState(false);
+  const [generating, setGenerating] = React.useState(false);
+  const [genResult, setGenResult] = React.useState<{ download_url: string; file_id: string; missing: string[]; mode?: string; replaced_count?: number; participant_count?: number; warnings?: string[] } | null>(null);
+  const [genError, setGenError] = React.useState<string | null>(null);
+  const [docTitle, setDocTitle] = React.useState("");
+  const [bodyText, setBodyText] = React.useState(reportContent);
+  const [markSubmission, setMarkSubmission] = React.useState(false);
+  const [submissionMonth, setSubmissionMonth] = React.useState("");
+  const [docs, setDocs] = React.useState<GeneratedDocument[]>([]);
+  const [loadingDocs, setLoadingDocs] = React.useState(false);
+
+  // Template upload state
+  const [showTplUpload, setShowTplUpload] = React.useState(false);
+  const [tplFile, setTplFile] = React.useState<File | null>(null);
+  const [tplName, setTplName] = React.useState("");
+  const [tplType, setTplType] = React.useState("activity_report");
+  const [uploadingTpl, setUploadingTpl] = React.useState(false);
+  const [tplError, setTplError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setBodyText(reportContent);
+  }, [reportContent]);
+
+  React.useEffect(() => {
+    loadTemplates();
+    loadDocs();
+  }, [activityId]);
+
+  async function loadTemplates() {
+    setLoadingTemplates(true);
+    try {
+      const data = await getDocumentTemplates();
+      setTemplates(data);
+    } catch { /* ignore */ }
+    setLoadingTemplates(false);
+  }
+
+  async function loadDocs() {
+    setLoadingDocs(true);
+    try {
+      const data = await getActivityDocuments(activityId);
+      setDocs(data);
+    } catch { /* ignore */ }
+    setLoadingDocs(false);
+  }
+
+  async function handlePreview() {
+    if (!selectedTemplateId) return;
+    setPreviewing(true);
+    setGenError(null);
+    try {
+      const result = await previewDocument(activityId, {
+        template_id: selectedTemplateId,
+        overrides: { 활동내용: bodyText, content: bodyText },
+      });
+      setPreview(result);
+    } catch (e: unknown) {
+      setGenError(e instanceof Error ? e.message : "미리보기 실패");
+    } finally {
+      setPreviewing(false);
+    }
+  }
 
   async function handleGenerate() {
+    if (!selectedTemplateId) return;
     setGenerating(true);
     setGenError(null);
     setGenResult(null);
     try {
-      const result = await generateActivityFees(activityId, feeAmount);
-      setGenResult(`완료: ${result.created}건 생성, ${result.skipped}건 건너뜀`);
+      const result = await generateDocument(activityId, {
+        template_id: selectedTemplateId,
+        document_title: docTitle || undefined,
+        overrides: { 활동내용: bodyText, content: bodyText },
+        mark_as_submission: markSubmission,
+        submission_month: submissionMonth || undefined,
+      });
+      setGenResult({ download_url: result.download_url, file_id: result.file_id ?? result.generated_file_id, missing: result.missing_fields, mode: result.mode, replaced_count: result.replaced_count, participant_count: result.participant_count, warnings: result.warnings });
+      loadDocs();
       onUpdated();
-    } catch (err: unknown) {
-      setGenError(err instanceof Error ? err.message : "생성에 실패했습니다.");
+    } catch (e: unknown) {
+      setGenError(e instanceof Error ? e.message : "문서 생성 실패");
     } finally {
       setGenerating(false);
     }
   }
 
-  function openEdit(record: ActivityFeeRecord) {
-    setEditingRecord(record);
-    setEditPaid(record.paid_amount);
-    setEditStatus(record.status);
-    setSaveError(null);
-  }
-
-  async function handleSaveEdit() {
-    if (!editingRecord) return;
-    setSaving(true);
-    setSaveError(null);
+  async function handleUploadTemplate() {
+    if (!tplFile) return;
+    setUploadingTpl(true);
+    setTplError(null);
     try {
-      await updateActivityFeeRecord(activityId, editingRecord.id, {
-        paid_amount: editPaid,
-        status: editStatus,
-      });
-      setEditingRecord(null);
-      onUpdated();
-    } catch (err: unknown) {
-      setSaveError(err instanceof Error ? err.message : "저장에 실패했습니다.");
+      const t = await uploadDocumentTemplate(tplFile, { name: tplName || tplFile.name, template_type: tplType });
+      setTemplates((prev) => [t, ...prev]);
+      setSelectedTemplateId(t.id);
+      setShowTplUpload(false);
+      setTplFile(null);
+      setTplName("");
+    } catch (e: unknown) {
+      setTplError(e instanceof Error ? e.message : "업로드 실패");
     } finally {
-      setSaving(false);
+      setUploadingTpl(false);
     }
   }
 
-  const paidCount = feeInfo.records.filter((r) => r.status === "paid").length;
-  const unpaidCount = feeInfo.records.filter((r) => r.status === "unpaid").length;
+  const inputSt: React.CSSProperties = {
+    background: "var(--surface)", color: "var(--text-main)",
+    border: "1px solid var(--border-soft)", borderRadius: 12,
+    padding: "8px 12px", fontSize: 14, width: "100%",
+  };
+
+  const selectedTemplate = templates.find((t) => t.id === selectedTemplateId);
 
   return (
-    <div className="space-y-4">
-      {/* Fee setup */}
-      <Card padding="lg">
-        <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--text-main)" }}>활동비 설정</h3>
-        <div className="flex flex-wrap items-end gap-3">
-          <div>
-            <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>
-              1인당 활동비 (원)
-            </label>
-            <input
-              type="number"
-              className="rounded-xl px-3 py-2 text-sm focus:outline-none min-h-[44px] w-40"
-              style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)" }}
-              value={feeAmount}
-              onChange={(e) => setFeeAmount(Number(e.target.value))}
-            />
-          </div>
-          <Button onClick={handleGenerate} loading={generating}>
-            활동비 대상 생성 / 갱신
+    <div className="mt-6 space-y-4">
+      <div style={{ borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
+        <div className="flex items-center justify-between mb-4">
+          <h4 className="text-sm font-semibold" style={{ color: "var(--text-main)" }}>제출 문서 생성 (HWPX)</h4>
+          <Button size="sm" variant="ghost" onClick={() => setShowTplUpload(!showTplUpload)}>
+            템플릿 업로드
           </Button>
         </div>
-        {genResult && (
-          <p className="mt-3 text-sm" style={{ color: "var(--success)" }}>{genResult}</p>
-        )}
-        {genError && (
-          <p className="mt-3 text-sm" style={{ color: "var(--danger)" }}>{genError}</p>
-        )}
-        <p className="mt-2 text-xs" style={{ color: "var(--text-muted)" }}>
-          참여자 탭에 등록된 부원을 대상으로 납부 대상을 생성합니다. 이미 납부/부분납부/면제 상태인 기록은 덮어쓰지 않습니다.
-        </p>
-      </Card>
 
-      {/* Fee summary */}
-      {feeInfo.records.length > 0 && (
-        <Card padding="lg">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-semibold" style={{ color: "var(--text-main)" }}>
-              납부 현황 ({feeInfo.total_count}명)
-            </h3>
+        {/* Template upload */}
+        {showTplUpload && (
+          <div className="rounded-xl p-4 mb-4 space-y-3" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+            <p className="text-xs font-medium" style={{ color: "var(--text-main)" }}>HWPX 템플릿 업로드</p>
+            <input type="file" accept=".hwpx,.hwp" style={inputSt}
+              onChange={(e) => setTplFile(e.target.files?.[0] ?? null)} />
+            <input type="text" placeholder="템플릿 이름" value={tplName}
+              onChange={(e) => setTplName(e.target.value)} style={inputSt} />
+            <select value={tplType} onChange={(e) => setTplType(e.target.value)} style={inputSt}>
+              {Object.entries(TEMPLATE_TYPE_LABEL).map(([k, v]) => (
+                <option key={k} value={k}>{v}</option>
+              ))}
+            </select>
+            {tplError && <p className="text-xs" style={{ color: "var(--danger)" }}>{tplError}</p>}
             <div className="flex gap-2">
-              <span className="text-xs rounded-full px-2.5 py-1"
-                style={{ background: "var(--success-soft)", color: "var(--success)" }}>
-                납부 {paidCount}명
-              </span>
-              <span className="text-xs rounded-full px-2.5 py-1"
-                style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>
-                미납 {unpaidCount}명
-              </span>
+              <Button size="sm" onClick={handleUploadTemplate} loading={uploadingTpl} disabled={!tplFile}>업로드</Button>
+              <Button size="sm" variant="secondary" onClick={() => setShowTplUpload(false)}>취소</Button>
             </div>
+            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+              placeholder 규칙: {"{{활동명}}"} {"{{활동일}}"} {"{{참여자명단}}"} {"{{활동내용}}"} 등
+            </p>
           </div>
-          {/* Desktop */}
-          <div className="hidden md:block overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr style={{ background: "var(--surface-soft)", borderBottom: "1px solid var(--border-soft)" }}>
-                  {["이름", "학번", "필요 금액", "납부 금액", "상태", "수정"].map((h) => (
-                    <th key={h} className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide"
-                      style={{ color: "var(--text-muted)" }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {feeInfo.records.map((r) => (
-                  <tr key={r.id} style={{ borderBottom: "1px solid var(--border-soft)" }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                    <td className="px-4 py-3 font-medium" style={{ color: "var(--text-main)" }}>{r.member_name ?? "-"}</td>
-                    <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{r.student_id ?? "-"}</td>
-                    <td className="px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>{fmt(r.required_amount)}원</td>
-                    <td className="px-4 py-3 text-right" style={{ color: "var(--text-main)" }}>{fmt(r.paid_amount)}원</td>
-                    <td className="px-4 py-3"><StatusBadge status={r.status} /></td>
-                    <td className="px-4 py-3">
-                      <Button size="sm" variant="ghost" onClick={() => openEdit(r)}>직접 수정</Button>
-                    </td>
-                  </tr>
+        )}
+
+        {/* Template select */}
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs mb-1 block" style={{ color: "var(--text-muted)" }}>HWPX 템플릿 선택</label>
+            {loadingTemplates ? (
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>불러오는 중...</p>
+            ) : templates.length === 0 ? (
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>템플릿을 먼저 업로드해 주세요.</p>
+            ) : (
+              <select value={selectedTemplateId} onChange={(e) => { setSelectedTemplateId(e.target.value); setPreview(null); setGenResult(null); }} style={inputSt}>
+                <option value="">-- 템플릿 선택 --</option>
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name} ({TEMPLATE_TYPE_LABEL[t.template_type] ?? t.template_type})
+                  </option>
                 ))}
-              </tbody>
-            </table>
+              </select>
+            )}
           </div>
-          {/* Mobile */}
-          <div className="md:hidden space-y-2">
-            {feeInfo.records.map((r) => (
-              <div key={r.id} className="rounded-xl p-3"
-                style={{ border: "1px solid var(--border-soft)", background: "var(--surface-soft)" }}>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-medium text-sm" style={{ color: "var(--text-main)" }}>{r.member_name ?? "-"}</p>
-                    {r.student_id && <p className="text-xs" style={{ color: "var(--text-muted)" }}>{r.student_id}</p>}
+
+          {/* Placeholder fields display */}
+          {selectedTemplate && selectedTemplate.placeholder_fields.length > 0 && (
+            <div className="rounded-xl p-3" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+              <p className="text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>템플릿 필드</p>
+              <div className="flex flex-wrap gap-1.5">
+                {selectedTemplate.placeholder_fields.map((f) => (
+                  <span key={f} className="text-xs px-2 py-0.5 rounded-full"
+                    style={{ background: "var(--primary-soft)", color: "var(--primary)" }}>
+                    {"{{"}{f}{"}}"}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Report body */}
+          <div>
+            <label className="text-xs mb-1 block" style={{ color: "var(--text-muted)" }}>보고서 본문 ({"{{활동내용}}"} 치환용)</label>
+            <textarea
+              value={bodyText}
+              onChange={(e) => setBodyText(e.target.value)}
+              rows={5}
+              style={{ ...inputSt, resize: "vertical", minHeight: 100, fontFamily: "inherit" }}
+              placeholder="AI 초안 또는 직접 작성한 보고서 본문..."
+            />
+          </div>
+
+          <div>
+            <label className="text-xs mb-1 block" style={{ color: "var(--text-muted)" }}>생성 문서 제목</label>
+            <input type="text" value={docTitle} onChange={(e) => setDocTitle(e.target.value)}
+              placeholder="예: Oui Parfum_20260530_정기스터디" style={inputSt} />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-4">
+            <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "var(--text-main)" }}>
+              <input type="checkbox" checked={markSubmission} onChange={(e) => setMarkSubmission(e.target.checked)} />
+              제출용 파일로 지정
+            </label>
+            {markSubmission && (
+              <div className="flex items-center gap-2">
+                <label className="text-xs" style={{ color: "var(--text-muted)" }}>제출 월</label>
+                <input type="month" value={submissionMonth} onChange={(e) => setSubmissionMonth(e.target.value)}
+                  style={{ ...inputSt, width: "auto" }} />
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" onClick={handlePreview}
+              disabled={!selectedTemplateId || previewing} loading={previewing}>
+              매핑 미리보기
+            </Button>
+            <Button size="sm" onClick={handleGenerate}
+              disabled={!selectedTemplateId || generating} loading={generating}>
+              HWPX 생성
+            </Button>
+          </div>
+
+          {genError && <p className="text-sm" style={{ color: "var(--danger)" }}>{genError}</p>}
+
+          {/* Preview result */}
+          {preview && (
+            <div className="rounded-xl p-4 space-y-2" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+              <div className="flex items-center gap-2">
+                <p className="text-xs font-semibold" style={{ color: "var(--text-main)" }}>매핑 미리보기</p>
+                {preview.mode && (
+                  <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--primary-soft)", color: "var(--primary)" }}>
+                    {preview.mode === "legacy_form" ? "레거시 폼" : preview.mode === "placeholder" ? "플레이스홀더" : "혼합"}
+                  </span>
+                )}
+              </div>
+              {/* Warnings */}
+              {(preview.warnings ?? []).map((w, i) => (
+                <p key={i} className="text-xs" style={{ color: "var(--warning)" }}>⚠ {w}</p>
+              ))}
+              {/* Mappings list */}
+              <div className="max-h-48 overflow-y-auto space-y-1">
+                {(preview.mappings ?? []).map((m, i) => (
+                  <div key={i} className="flex items-center gap-2 text-xs">
+                    <span className="shrink-0 font-medium max-w-[110px] truncate" style={{ color: "var(--text-muted)" }}>{m.source}</span>
+                    <span className="text-xs" style={{ color: "var(--text-muted)" }}>→</span>
+                    <span className="truncate" style={{ color: "var(--text-main)" }}>{m.target || "(빈 값)"}</span>
                   </div>
-                  <StatusBadge status={r.status} />
-                </div>
-                <div className="flex items-center justify-between mt-2">
+                ))}
+                {/* Fallback for old API: show mapped_fields if no mappings */}
+                {!(preview.mappings ?? []).length && Object.entries(preview.mapped_fields ?? {}).map(([k, v]) => (
+                  <div key={k} className="flex gap-2 text-xs">
+                    <span className="shrink-0 font-medium" style={{ color: "var(--text-muted)" }}>{"{{"}{k}{"}}"}</span>
+                    <span className="truncate" style={{ color: "var(--text-main)" }}>{v || "(빈 값)"}</span>
+                  </div>
+                ))}
+              </div>
+              {(preview.missing_fields ?? []).length > 0 && (
+                <p className="text-xs" style={{ color: "var(--warning)" }}>
+                  누락 필드: {preview.missing_fields.join(", ")}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Generate result */}
+          {genResult && (
+            <div className="rounded-xl p-4" style={{ background: "var(--success-soft)", border: "1px solid var(--border-soft)" }}>
+              <p className="text-sm font-medium mb-1" style={{ color: "var(--success)" }}>HWPX 문서 생성 완료</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 mb-2">
+                {genResult.replaced_count != null && (
+                  <p className="text-xs" style={{ color: "var(--success)" }}>치환 필드: {genResult.replaced_count}개</p>
+                )}
+                {genResult.participant_count != null && (
+                  <p className="text-xs" style={{ color: "var(--success)" }}>참여자: {genResult.participant_count}명</p>
+                )}
+                {genResult.mode && (
+                  <p className="text-xs" style={{ color: "var(--success)" }}>모드: {genResult.mode}</p>
+                )}
+              </div>
+              {(genResult.warnings ?? []).map((w, i) => (
+                <p key={i} className="text-xs mb-1" style={{ color: "var(--warning)" }}>⚠ {w}</p>
+              ))}
+              {(genResult.missing ?? []).length > 0 && (
+                <p className="text-xs mb-2" style={{ color: "var(--warning)" }}>
+                  누락 필드: {genResult.missing.join(", ")}
+                </p>
+              )}
+              <div className="flex flex-wrap gap-2 mt-2">
+                <a href={genResult.download_url} download>
+                  <Button size="sm">
+                    <Download className="h-3.5 w-3.5" />
+                    HWPX 다운로드
+                  </Button>
+                </a>
+                <Button size="sm" variant="secondary" onClick={() => {
+                  window.history.pushState({}, "", window.location.pathname + "?tab=files");
+                  window.dispatchEvent(new CustomEvent("switch-tab", { detail: "files" }));
+                }}>
+                  파일함에서 보기
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Generated documents list */}
+      {docs.length > 0 && (
+        <div>
+          <p className="text-xs font-semibold mb-2" style={{ color: "var(--text-muted)" }}>생성된 문서 목록</p>
+          <div className="space-y-2">
+            {docs.map((d) => (
+              <div key={d.id} className="flex items-center justify-between rounded-xl px-3 py-2"
+                style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+                <div>
+                  <p className="text-xs font-medium" style={{ color: "var(--text-main)" }}>{d.document_title || d.title}</p>
                   <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                    필요: {fmt(r.required_amount)}원 / 납부: {fmt(r.paid_amount)}원
+                    {d.template_name}{d.submission_month ? ` · ${d.submission_month}` : ""}
+                    {d.is_submission_file && " · 제출용"}
+                    {d.created_at ? ` · ${new Date(d.created_at).toLocaleDateString("ko-KR")}` : ""}
                   </p>
-                  <Button size="sm" variant="ghost" onClick={() => openEdit(r)}>수정</Button>
                 </div>
+                <a href={d.download_url} download>
+                  <Button size="sm" variant="ghost">
+                    <Download className="h-3.5 w-3.5" />
+                  </Button>
+                </a>
               </div>
             ))}
           </div>
-        </Card>
-      )}
-
-      {/* Edit modal */}
-      {editingRecord && (
-        <Modal isOpen onClose={() => setEditingRecord(null)} title="납부 상태 직접 수정">
-          <div className="space-y-4">
-            <div
-              className="rounded-xl p-3 text-sm"
-              style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}
-            >
-              <p className="font-medium" style={{ color: "var(--text-main)" }}>
-                {editingRecord.member_name}
-                {editingRecord.student_id && (
-                  <span className="ml-1.5 text-xs font-normal" style={{ color: "var(--text-muted)" }}>
-                    ({editingRecord.student_id})
-                  </span>
-                )}
-              </p>
-            </div>
-            <div>
-              <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-muted)" }}>납부 상태</label>
-              <select
-                className="w-full rounded-xl px-3 py-2 text-sm focus:outline-none min-h-[44px]"
-                style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)" }}
-                value={editStatus}
-                onChange={(e) => setEditStatus(e.target.value)}
-              >
-                <option value="unpaid">미납</option>
-                <option value="paid">납부 완료</option>
-                <option value="partial">부분 납부</option>
-                <option value="need_check">확인 필요</option>
-                <option value="exempt">면제</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-muted)" }}>납부 금액 (원)</label>
-              <input
-                type="number"
-                className="w-full rounded-xl px-3 py-2 text-sm focus:outline-none min-h-[44px]"
-                style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)" }}
-                value={editPaid}
-                onChange={(e) => setEditPaid(Number(e.target.value))}
-              />
-            </div>
-            {saveError && <p className="text-sm" style={{ color: "var(--danger)" }}>{saveError}</p>}
-            <div className="flex gap-2">
-              <Button className="flex-1 min-h-[44px]" onClick={handleSaveEdit} loading={saving}>저장</Button>
-              <Button className="flex-1 min-h-[44px]" variant="secondary" onClick={() => setEditingRecord(null)} disabled={saving}>취소</Button>
-            </div>
-          </div>
-        </Modal>
+        </div>
       )}
     </div>
   );
 }
+
 
 // ─── Receipts Tab ─────────────────────────────────────────────────────────────
 
@@ -938,10 +1152,15 @@ function ReceiptsTab({
   receipts: ActivityDetail["receipts"];
   onUpdated: () => void;
 }) {
+  const receiptFileRef = React.useRef<HTMLInputElement>(null);
   const [allReceipts, setAllReceipts] = useState<Receipt[]>([]);
   const [showLink, setShowLink] = useState(false);
   const [linking, setLinking] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [previewReceiptId, setPreviewReceiptId] = useState<string | null>(null);
 
   async function loadAll() {
     try {
@@ -986,6 +1205,29 @@ function ReceiptsTab({
     }
   }
 
+  async function handleReceiptUpload() {
+    if (!uploadFile) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      // Upload via AI assistant with activity context so receipt + file are both created
+      const fd = new FormData();
+      fd.append("files", uploadFile);
+      fd.append("activity_id", activityId);
+      fd.append("activity_mode", "link_existing");
+      fd.append("requested_intent", "receipt_analysis");
+      fd.append("auto_apply", "true");
+      await executeAssistant(fd);
+      setUploadFile(null);
+      if (receiptFileRef.current) receiptFileRef.current.value = "";
+      onUpdated();
+    } catch (err: unknown) {
+      setUploadError(err instanceof Error ? err.message : "영수증 업로드 실패");
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
     <Card padding="none">
       <div
@@ -1000,13 +1242,31 @@ function ReceiptsTab({
             <Plus className="h-3.5 w-3.5" />
             기존 영수증 연결
           </Button>
-          <Link href="/receipts">
-            <Button size="sm" variant="ghost">
-              영수증 업로드
-            </Button>
-          </Link>
+          <Button size="sm" variant="ghost" onClick={() => receiptFileRef.current?.click()}>
+            영수증 분석 업로드
+          </Button>
+          <input
+            ref={receiptFileRef}
+            type="file"
+            accept="image/*,.pdf"
+            className="hidden"
+            onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+          />
         </div>
       </div>
+      {/* Direct receipt upload */}
+      {uploadFile && (
+        <div className="p-3 flex items-center gap-3" style={{ borderBottom: "1px solid var(--border-soft)", background: "var(--surface-soft)" }}>
+          <span className="text-xs flex-1 truncate" style={{ color: "var(--text-main)" }}>{uploadFile.name}</span>
+          <Button size="sm" onClick={handleReceiptUpload} loading={uploading}>
+            분석 후 저장
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => { setUploadFile(null); setUploadError(null); }}>취소</Button>
+        </div>
+      )}
+      {uploadError && (
+        <p className="px-4 py-2 text-xs" style={{ color: "var(--danger)" }}>{uploadError}</p>
+      )}
 
       {actionError && (
         <div className="p-4"><ErrorState message={actionError} /></div>
@@ -1020,37 +1280,71 @@ function ReceiptsTab({
       ) : (
         <div className="divide-y" style={{ borderTop: "1px solid var(--border-soft)" }}>
           {receipts.map((r) => (
-            <div key={r.id} className="p-4 flex items-center justify-between gap-3">
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm" style={{ color: "var(--text-main)" }}>
-                  {r.store_name ?? "(상호명 없음)"}
-                  {r.amount > 0 && (
-                    <span className="ml-2 text-xs" style={{ color: "var(--text-muted)" }}>
-                      {fmt(r.amount)}원
-                    </span>
+            <div key={r.id} className="p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm" style={{ color: "var(--text-main)" }}>
+                    {r.store_name ?? "(상호명 없음)"}
+                    {r.amount > 0 && (
+                      <span className="ml-2 text-xs" style={{ color: "var(--text-muted)" }}>
+                        {fmt(r.amount)}원
+                      </span>
+                    )}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                    {r.receipt_date && (
+                      <span className="text-xs" style={{ color: "var(--text-muted)" }}>{r.receipt_date}</span>
+                    )}
+                    <StatusBadge status={r.evidence_status} />
+                    {r.need_check && (
+                      <span className="text-xs rounded-full px-2 py-0.5"
+                        style={{ background: "var(--warning-soft)", color: "var(--warning)" }}>
+                        확인 필요
+                      </span>
+                    )}
+                    {r.file_id && (
+                      <button
+                        className="text-xs"
+                        style={{ color: "var(--primary)" }}
+                        onClick={() => setPreviewReceiptId(previewReceiptId === r.id ? null : r.id)}
+                      >
+                        {previewReceiptId === r.id ? "이미지 닫기" : "이미지 보기"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="flex gap-2 items-center">
+                  {r.file_id && (
+                    <a href={`/api/files/${r.file_id}/download`} download>
+                      <Button size="sm" variant="ghost">
+                        <Download className="h-3.5 w-3.5" />
+                      </Button>
+                    </a>
                   )}
-                </p>
-                <div className="flex flex-wrap items-center gap-2 mt-0.5">
-                  {r.receipt_date && (
-                    <span className="text-xs" style={{ color: "var(--text-muted)" }}>{r.receipt_date}</span>
-                  )}
-                  <StatusBadge status={r.evidence_status} />
-                  {r.need_check && (
-                    <span className="text-xs rounded-full px-2 py-0.5"
-                      style={{ background: "var(--warning-soft)", color: "var(--warning)" }}>
-                      확인 필요
-                    </span>
-                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleUnlink(r.id)}
+                    disabled={linking === r.id}
+                  >
+                    연결 해제
+                  </Button>
                 </div>
               </div>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => handleUnlink(r.id)}
-                disabled={linking === r.id}
-              >
-                연결 해제
-              </Button>
+              {/* Inline image preview */}
+              {r.file_id && previewReceiptId === r.id && (
+                <div className="mt-3">
+                  <img
+                    src={`/api/files/${r.file_id}/preview/inline`}
+                    alt={r.store_name ?? "영수증"}
+                    className="max-w-full rounded-xl"
+                    style={{ maxHeight: 320, border: "1px solid var(--border-soft)" }}
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).style.display = "none";
+                    }}
+                  />
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -1102,25 +1396,911 @@ function ReceiptsTab({
   );
 }
 
-// ─── Attachments Tab ──────────────────────────────────────────────────────────
+// ─── File Vault Tab (Task 19) ─────────────────────────────────────────────────
 
-function AttachmentsTab() {
+const FILE_CATEGORY_LABEL: Record<string, string> = {
+  activity_report: "활동 내역서",
+  activity_plan: "활동 기획서",
+  receipt: "영수증/증빙",
+  photo: "사진",
+  google_form_application: "신청서(Google Form)",
+  google_form_feedback: "피드백(Google Form)",
+  bank_statement: "거래내역서",
+  attachment: "첨부파일",
+  submission_package: "제출 패키지",
+  other: "기타",
+};
+
+const FILE_ROLE_LABEL: Record<string, string> = {
+  source: "원본",
+  evidence: "증빙",
+  report: "보고",
+  plan: "기획",
+  attachment: "첨부",
+  submission: "제출",
+  generated: "생성됨",
+};
+
+function formatBytes(bytes: number | null): string {
+  if (!bytes) return "-";
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
+}
+
+function FilePreviewPanel({
+  file,
+  onClose,
+}: {
+  file: ActivityFile;
+  onClose: () => void;
+}) {
+  const [preview, setPreview] = React.useState<FilePreviewResult | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [previewError, setPreviewError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setLoading(true);
+    setPreviewError(null);
+    getFilePreview(file.id)
+      .then(setPreview)
+      .catch((e) => setPreviewError(e instanceof Error ? e.message : "미리보기 실패"))
+      .finally(() => setLoading(false));
+  }, [file.id]);
+
+  const inputSt: React.CSSProperties = {
+    background: "var(--surface-soft)",
+    border: "1px solid var(--border-soft)",
+    borderRadius: 12,
+    padding: "12px 16px",
+    fontSize: 13,
+    color: "var(--text-main)",
+  };
+
   return (
-    <Card padding="lg">
-      <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--text-main)" }}>
-        첨부 자료
-      </h3>
-      <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-        사진, PDF, 활동 자료를 업로드할 수 있습니다. 업로드된 파일은 보고서 생성에 활용됩니다.
-      </p>
-      <div className="mt-4">
-        <Link href="/assistant">
-          <Button variant="secondary" size="sm">
-            AI 작업실에서 파일 업로드
+    <div
+      className="rounded-2xl p-4"
+      style={{ background: "var(--surface)", border: "1px solid var(--border-soft)" }}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-sm font-semibold truncate max-w-[70%]" style={{ color: "var(--text-main)" }}>
+          {file.original_filename}
+        </p>
+        <div className="flex gap-2">
+          <a href={file.download_url} download={file.original_filename}>
+            <Button size="sm" variant="secondary">
+              <Download className="h-3.5 w-3.5" />
+              다운로드
+            </Button>
+          </a>
+          <Button size="sm" variant="ghost" onClick={onClose}>
+            <X className="h-3.5 w-3.5" />
           </Button>
-        </Link>
+        </div>
       </div>
-    </Card>
+
+      {loading && (
+        <p className="text-sm text-center py-8" style={{ color: "var(--text-muted)" }}>미리보기 불러오는 중...</p>
+      )}
+      {previewError && (
+        <p className="text-sm py-4" style={{ color: "var(--danger)" }}>{previewError}</p>
+      )}
+
+      {preview && !loading && (
+        <>
+          {preview.type === "pdf" && (
+            <iframe
+              src={`/api/files/${file.id}/preview/inline`}
+              className="w-full rounded-xl"
+              style={{ height: 480, border: "1px solid var(--border-soft)" }}
+            />
+          )}
+          {preview.type === "image" && (
+            <img
+              src={`/api/files/${file.id}/preview/inline`}
+              alt={file.original_filename}
+              className="max-w-full rounded-xl"
+              style={{ maxHeight: 480, border: "1px solid var(--border-soft)" }}
+            />
+          )}
+          {preview.type === "excel" && (
+            <div className="space-y-3 max-h-96 overflow-y-auto">
+              {preview.sheets.map((sheet) => (
+                <div key={sheet.name}>
+                  <p className="text-xs font-medium mb-1" style={{ color: "var(--text-muted)" }}>{sheet.name}</p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs" style={{ borderCollapse: "collapse" }}>
+                      <thead>
+                        <tr style={{ background: "var(--surface-soft)" }}>
+                          {sheet.headers.map((h, i) => (
+                            <th key={i} className="px-2 py-1 text-left border" style={{ borderColor: "var(--border-soft)", color: "var(--text-muted)" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sheet.rows.slice(0, 15).map((row, ri) => (
+                          <tr key={ri}>
+                            {row.map((cell, ci) => (
+                              <td key={ci} className="px-2 py-1 border" style={{ borderColor: "var(--border-soft)", color: "var(--text-main)" }}>{cell}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {sheet.rows.length > 15 && (
+                    <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>+{sheet.rows.length - 15}행 더 있음</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {preview.type === "zip" && (
+            <div className="max-h-72 overflow-y-auto rounded-xl p-3" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+              <p className="text-xs font-medium mb-2" style={{ color: "var(--text-muted)" }}>ZIP 내부 파일 ({preview.files.length}개)</p>
+              {preview.files.map((f, i) => (
+                <div key={i} className="flex items-center justify-between py-1 border-b" style={{ borderColor: "var(--border-soft)" }}>
+                  <span className="text-xs truncate" style={{ color: "var(--text-main)" }}>{f.filename}</span>
+                  <span className="text-xs ml-2 shrink-0" style={{ color: "var(--text-muted)" }}>{formatBytes(f.size_bytes)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {preview.type === "hwp" && (
+            <div className="rounded-xl p-4 text-center" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+              {preview.doc_title && (
+                <p className="text-sm font-medium mb-2" style={{ color: "var(--text-main)" }}>{preview.doc_title}</p>
+              )}
+              <p className="text-sm mb-3" style={{ color: "var(--text-muted)" }}>{preview.message}</p>
+              <a href={file.download_url} download={file.original_filename}>
+                <Button variant="primary" size="sm">
+                  <Download className="h-3.5 w-3.5" />
+                  원본 다운로드
+                </Button>
+              </a>
+            </div>
+          )}
+          {(preview.type === "unsupported" || preview.type === "error") && (
+            <div className="rounded-xl p-4 text-center" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+              <p className="text-sm mb-3" style={{ color: "var(--text-muted)" }}>{preview.message}</p>
+              <a href={file.download_url} download={file.original_filename}>
+                <Button variant="secondary" size="sm">
+                  <Download className="h-3.5 w-3.5" />
+                  원본 파일 다운로드
+                </Button>
+              </a>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function FileVaultTab({
+  activityId,
+  onUpdated,
+}: {
+  activityId: string;
+  onUpdated: () => void;
+}) {
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [files, setFiles] = React.useState<ActivityFile[]>([]);
+  const [loadingFiles, setLoadingFiles] = React.useState(true);
+  const [filterCategory, setFilterCategory] = React.useState("");
+  const [filterSubmission, setFilterSubmission] = React.useState(false);
+  const [uploading, setUploading] = React.useState(false);
+  const [uploadFile, setUploadFile] = React.useState<File | null>(null);
+  const [uploadCategory, setUploadCategory] = React.useState("");
+  const [uploadRole, setUploadRole] = React.useState("");
+  const [uploadIsSubmission, setUploadIsSubmission] = React.useState(false);
+  const [uploadMonth, setUploadMonth] = React.useState("");
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
+  const [deletingId, setDeletingId] = React.useState<string | null>(null);
+  const [previewFile, setPreviewFile] = React.useState<ActivityFile | null>(null);
+  const [actionError, setActionError] = React.useState<string | null>(null);
+
+  // Submission package state
+  const [pkgMonth, setPkgMonth] = React.useState("");
+  const [pkgPreview, setPkgPreview] = React.useState<SubmissionPackagePreview | null>(null);
+  const [pkgLoading, setPkgLoading] = React.useState(false);
+  const [pkgGenerating, setPkgGenerating] = React.useState(false);
+  const [pkgResult, setPkgResult] = React.useState<{ download_url: string; file_count: number } | null>(null);
+  const [pkgError, setPkgError] = React.useState<string | null>(null);
+
+  async function loadFiles() {
+    setLoadingFiles(true);
+    try {
+      const data = await getActivityFiles(activityId, {
+        category: filterCategory || undefined,
+      });
+      setFiles(filterSubmission ? data.filter((f) => f.is_submission_file) : data);
+    } catch {
+      // ignore
+    } finally {
+      setLoadingFiles(false);
+    }
+  }
+
+  React.useEffect(() => {
+    loadFiles();
+  }, [activityId, filterCategory, filterSubmission]);
+
+  async function handleUpload() {
+    if (!uploadFile) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      await uploadActivityFile(activityId, uploadFile, {
+        file_category: uploadCategory || undefined,
+        file_role: uploadRole || undefined,
+        is_submission_file: uploadIsSubmission,
+        submission_month: uploadMonth || undefined,
+      });
+      setUploadFile(null);
+      setUploadCategory("");
+      setUploadRole("");
+      setUploadIsSubmission(false);
+      setUploadMonth("");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      await loadFiles();
+      onUpdated();
+    } catch (err: unknown) {
+      setUploadError(err instanceof Error ? err.message : "업로드 실패");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleDelete(fileId: string) {
+    if (!confirm("이 파일을 삭제하시겠습니까?\n화면에서는 사라지지만 원본 파일은 복구를 위해 서버에 보관될 수 있습니다.")) return;
+    setDeletingId(fileId);
+    setActionError(null);
+    try {
+      await softDeleteFile(fileId);
+      setFiles((prev) => prev.filter((f) => f.id !== fileId));
+      if (previewFile?.id === fileId) setPreviewFile(null);
+      onUpdated();
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "삭제 실패");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  async function handleToggleSubmission(file: ActivityFile) {
+    try {
+      const updated = await patchFileSubmission(file.id, {
+        is_submission_file: !file.is_submission_file,
+      });
+      setFiles((prev) => prev.map((f) => (f.id === file.id ? updated : f)));
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : "수정 실패");
+    }
+  }
+
+  async function handlePkgPreview() {
+    if (!pkgMonth) return;
+    setPkgLoading(true);
+    setPkgError(null);
+    setPkgPreview(null);
+    setPkgResult(null);
+    try {
+      const result = await getSubmissionPackagePreview(pkgMonth);
+      setPkgPreview(result);
+    } catch (err: unknown) {
+      setPkgError(err instanceof Error ? err.message : "미리보기 실패");
+    } finally {
+      setPkgLoading(false);
+    }
+  }
+
+  async function handlePkgGenerate() {
+    if (!pkgMonth) return;
+    setPkgGenerating(true);
+    setPkgError(null);
+    try {
+      const result = await generateSubmissionPackage({ month: pkgMonth });
+      setPkgResult({ download_url: result.download_url, file_count: result.file_count });
+    } catch (err: unknown) {
+      setPkgError(err instanceof Error ? err.message : "ZIP 생성 실패");
+    } finally {
+      setPkgGenerating(false);
+    }
+  }
+
+  const sel: React.CSSProperties = {
+    background: "var(--surface)",
+    color: "var(--text-main)",
+    border: "1px solid var(--border-soft)",
+    borderRadius: 10,
+    padding: "7px 10px",
+    fontSize: 13,
+  };
+
+  return (
+    <div className="space-y-3">
+
+      {/* ── 업로드 카드 ── */}
+      <Card padding="lg">
+        {/* 드래그 영역 */}
+        <div
+          className="flex flex-col items-center justify-center gap-1.5 rounded-xl p-5 text-center cursor-pointer transition-all hover:opacity-80 mb-3"
+          style={{
+            border: uploadFile ? "2px dashed var(--primary)" : "2px dashed var(--border-soft)",
+            background: uploadFile ? "var(--primary-soft, rgba(99,102,241,0.06))" : "var(--surface-soft)",
+          }}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          {uploadFile ? (
+            <>
+              <p className="text-sm font-medium" style={{ color: "var(--primary)" }}>{uploadFile.name}</p>
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>클릭해서 변경</p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium" style={{ color: "var(--text-muted)" }}>파일 선택 또는 드래그</p>
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>PDF · 이미지 · 엑셀 · HWP · ZIP</p>
+            </>
+          )}
+        </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv,.hwp,.hwpx,.zip"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0] ?? null;
+            setUploadFile(f);
+            if (f && !uploadCategory) {
+              const name = f.name.toLowerCase();
+              if (name.includes("내역서") || name.includes("보고")) setUploadCategory("activity_report");
+              else if (name.includes("기획서") || name.includes("계획")) setUploadCategory("activity_plan");
+              else if (name.includes("영수증")) setUploadCategory("receipt");
+            }
+          }}
+        />
+
+        {/* 옵션 행 */}
+        <div className="flex flex-wrap items-center gap-2">
+          <select value={uploadCategory} onChange={(e) => setUploadCategory(e.target.value)} style={sel}>
+            <option value="">유형 자동</option>
+            {Object.entries(FILE_CATEGORY_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+          <select value={uploadRole} onChange={(e) => setUploadRole(e.target.value)} style={sel}>
+            <option value="">역할 자동</option>
+            {Object.entries(FILE_ROLE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+          <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none" style={{ color: "var(--text-muted)" }}>
+            <input type="checkbox" checked={uploadIsSubmission} onChange={(e) => setUploadIsSubmission(e.target.checked)} />
+            제출용
+          </label>
+          {uploadIsSubmission && (
+            <input type="month" value={uploadMonth} onChange={(e) => setUploadMonth(e.target.value)}
+              style={{ ...sel, width: "auto" }} />
+          )}
+          <Button onClick={handleUpload} loading={uploading} disabled={!uploadFile || uploading}>
+            업로드
+          </Button>
+        </div>
+        {uploadError && <p className="text-xs mt-2" style={{ color: "var(--danger)" }}>{uploadError}</p>}
+      </Card>
+
+      {/* ── 필터 + 파일 목록 ── */}
+      <Card padding="none">
+        {/* 필터 바 */}
+        <div className="flex flex-wrap items-center gap-2 px-4 py-3"
+          style={{ borderBottom: "1px solid var(--border-soft)" }}>
+          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} style={{ ...sel, flex: "none" }}>
+            <option value="">전체 유형</option>
+            {Object.entries(FILE_CATEGORY_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+          <button
+            onClick={() => setFilterSubmission(!filterSubmission)}
+            className="rounded-full px-3 py-1 text-xs font-medium transition-all"
+            style={filterSubmission
+              ? { background: "var(--primary)", color: "#fff" }
+              : { background: "var(--surface-soft)", color: "var(--text-muted)", border: "1px solid var(--border-soft)" }}
+          >
+            제출용
+          </button>
+          {files.length > 0 && (
+            <span className="ml-auto text-xs" style={{ color: "var(--text-muted)" }}>
+              {files.length}개
+            </span>
+          )}
+        </div>
+
+        {actionError && (
+          <p className="px-4 py-2 text-xs" style={{ color: "var(--danger)" }}>{actionError}</p>
+        )}
+
+        {/* 미리보기 패널 */}
+        {previewFile && (
+          <div className="p-3" style={{ borderBottom: "1px solid var(--border-soft)" }}>
+            <FilePreviewPanel file={previewFile} onClose={() => setPreviewFile(null)} />
+          </div>
+        )}
+
+        {/* 목록 */}
+        {loadingFiles ? (
+          <div className="p-6 text-center">
+            <p className="text-sm" style={{ color: "var(--text-muted)" }}>불러오는 중...</p>
+          </div>
+        ) : files.length === 0 ? (
+          <div className="p-6">
+            <EmptyState message="파일이 없습니다." description="위에서 파일을 업로드하세요." />
+          </div>
+        ) : (
+          <div className="divide-y" style={{ borderTop: "none" }}>
+            {files.map((f) => (
+              <div key={f.id} className="flex items-center gap-3 px-4 py-3 group"
+                style={{ transition: "background 0.1s" }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+
+                {/* 파일 아이콘 */}
+                <div className="shrink-0 w-9 h-9 rounded-lg flex items-center justify-center text-xs font-bold uppercase"
+                  style={{ background: "var(--primary-soft, rgba(99,102,241,0.1))", color: "var(--primary)" }}>
+                  {(f.file_ext ?? "?").slice(0, 4)}
+                </div>
+
+                {/* 정보 */}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate" style={{ color: "var(--text-main)" }}>
+                    {f.original_filename}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                    {f.file_category && (
+                      <span className="text-xs rounded-full px-2 py-0.5"
+                        style={{ background: "var(--primary-soft)", color: "var(--primary)" }}>
+                        {FILE_CATEGORY_LABEL[f.file_category] ?? f.file_category}
+                      </span>
+                    )}
+                    {f.is_submission_file && (
+                      <span className="text-xs rounded-full px-2 py-0.5"
+                        style={{ background: "var(--success-soft)", color: "var(--success)" }}>
+                        제출용{f.submission_month ? ` ${f.submission_month}` : ""}
+                      </span>
+                    )}
+                    <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+                      {formatBytes(f.size_bytes)}
+                      {f.created_at && ` · ${new Date(f.created_at).toLocaleDateString("ko-KR")}`}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 액션 버튼 */}
+                <div className="flex items-center gap-1 shrink-0">
+                  {f.preview_available && (
+                    <button
+                      className="rounded-lg px-2.5 py-1.5 text-xs transition-all hover:opacity-75"
+                      style={{ background: "var(--surface-soft)", color: "var(--text-muted)", border: "1px solid var(--border-soft)" }}
+                      onClick={() => setPreviewFile(previewFile?.id === f.id ? null : f)}
+                    >
+                      {previewFile?.id === f.id ? "닫기" : "미리보기"}
+                    </button>
+                  )}
+                  <a href={f.download_url} download={f.original_filename}>
+                    <button className="p-1.5 rounded-lg transition-all hover:opacity-75"
+                      style={{ color: "var(--text-muted)" }} title="다운로드">
+                      <Download className="h-4 w-4" />
+                    </button>
+                  </a>
+                  <button
+                    className="p-1.5 rounded-lg transition-all hover:opacity-75"
+                    style={{ color: f.is_submission_file ? "var(--warning)" : "var(--text-muted)" }}
+                    title={f.is_submission_file ? "제출용 해제" : "제출용 지정"}
+                    onClick={() => handleToggleSubmission(f)}
+                  >
+                    {f.is_submission_file ? "★" : "☆"}
+                  </button>
+                  <button
+                    className="p-1.5 rounded-lg transition-all hover:opacity-75"
+                    style={{ color: "var(--danger)" }}
+                    title="삭제"
+                    disabled={deletingId === f.id}
+                    onClick={() => handleDelete(f.id)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* ── 제출 패키지 ── */}
+      <Card padding="lg">
+        <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--text-main)" }}>월별 제출 패키지</h3>
+        <div className="flex flex-wrap items-center gap-2">
+          <input type="month" value={pkgMonth} onChange={(e) => setPkgMonth(e.target.value)}
+            style={{ ...sel, minHeight: 38 }} />
+          <Button size="sm" variant="secondary" onClick={handlePkgPreview} disabled={!pkgMonth || pkgLoading}>
+            {pkgLoading ? "조회 중..." : "미리보기"}
+          </Button>
+          <Button size="sm" onClick={handlePkgGenerate} disabled={!pkgMonth || pkgGenerating}>
+            {pkgGenerating ? "생성 중..." : "ZIP 생성"}
+          </Button>
+        </div>
+
+        {pkgError && <p className="text-xs mt-2" style={{ color: "var(--danger)" }}>{pkgError}</p>}
+
+        {pkgResult && (
+          <div className="flex items-center gap-3 mt-3 rounded-xl p-3"
+            style={{ background: "var(--success-soft)", border: "1px solid var(--border-soft)" }}>
+            <p className="text-sm flex-1" style={{ color: "var(--success)" }}>
+              ZIP 완료 · {pkgResult.file_count}개 파일
+            </p>
+            <a href={pkgResult.download_url} download>
+              <Button size="sm" variant="secondary">
+                <Download className="h-3.5 w-3.5" />
+                다운로드
+              </Button>
+            </a>
+          </div>
+        )}
+
+        {pkgPreview && (
+          <div className="mt-3 space-y-1.5">
+            <div className="flex gap-3 text-xs mb-1" style={{ color: "var(--text-muted)" }}>
+              <span>활동 {pkgPreview.summary.activity_count}개</span>
+              <span>제출파일 {pkgPreview.summary.submission_file_count}개</span>
+              {pkgPreview.summary.missing_count > 0 && (
+                <span style={{ color: "var(--warning)" }}>누락 {pkgPreview.summary.missing_count}개</span>
+              )}
+            </div>
+            {pkgPreview.activities.map((act) => (
+              <div key={act.activity_id} className="rounded-xl p-3"
+                style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+                <p className="text-xs font-semibold" style={{ color: "var(--text-main)" }}>
+                  {act.title}
+                  {act.activity_date && (
+                    <span className="ml-1.5 font-normal" style={{ color: "var(--text-muted)" }}>{act.activity_date}</span>
+                  )}
+                </p>
+                {act.submission_files.length > 0 ? (
+                  <div className="mt-1 space-y-0.5">
+                    {act.submission_files.map((sf) => (
+                      <p key={sf.id} className="text-xs" style={{ color: "var(--text-muted)" }}>
+                        · {sf.filename}
+                      </p>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>제출용 파일 없음</p>
+                )}
+                {act.missing_items.length > 0 && (
+                  <p className="text-xs mt-1" style={{ color: "var(--warning)" }}>
+                    누락: {act.missing_items.map((m) => FILE_CATEGORY_LABEL[m] ?? m).join(", ")}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ─── Participant Import Tab (Task 27) ─────────────────────────────────────────
+
+const FORM_TYPE_LABEL: Record<string, string> = {
+  activity_application_form: "활동 신청서",
+  activity_feedback_form: "활동 후 피드백/활동지",
+  bank_statement: "거래내역서",
+  member_roster: "부원 명부",
+  unknown_excel: "알 수 없음",
+};
+
+const PARTICIPANT_STATUS_LABEL: Record<string, string> = {
+  applied: "신청",
+  confirmed: "확정",
+  attended: "참석",
+  completed: "완료",
+  cancelled: "취소",
+  no_show: "불참",
+};
+
+const MATCH_STATUS_LABEL: Record<string, string> = {
+  matched_member: "기존 부원",
+  needs_review: "확인 필요",
+  duplicate_candidate: "중복 후보",
+  unregistered_candidate: "미등록 후보",
+  already_participant: "이미 참가자",
+};
+
+const MATCH_STATUS_COLOR: Record<string, { bg: string; color: string }> = {
+  matched_member: { bg: "#d1fae5", color: "var(--success)" },
+  needs_review: { bg: "#fef9c3", color: "var(--warning, #b45309)" },
+  duplicate_candidate: { bg: "#fef3c7", color: "#b45309" },
+  unregistered_candidate: { bg: "#fee2e2", color: "var(--danger)" },
+  already_participant: { bg: "#e0e7ff", color: "#4338ca" },
+};
+
+const UNREGISTERED_ACTION_LABEL: Record<string, string> = {
+  link_existing_member: "기존 부원 연결",
+  create_new_member: "새 부원으로 등록",
+  mark_external: "외부인으로 유지",
+  ignore: "무시",
+  needs_user_selection: "선택 필요",
+};
+
+function ParticipantImportTab({
+  activityId,
+  onUpdated,
+}: {
+  activityId: string;
+  onUpdated: () => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [preview, setPreview] = useState<import("@/lib/api").ParticipantImportPreview | null>(null);
+  const [rowOverrides, setRowOverrides] = useState<Record<number, string>>({});
+  const [confirmResult, setConfirmResult] = useState<import("@/lib/api").ParticipantImportConfirmResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  async function handlePreview() {
+    if (!file) return;
+    setPreviewing(true);
+    setError(null);
+    setPreview(null);
+    setConfirmResult(null);
+    setRowOverrides({});
+    try {
+      const result = await previewParticipantImport(activityId, file);
+      setPreview(result);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "미리보기 실패");
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function handleConfirm() {
+    if (!preview) return;
+    setConfirming(true);
+    setError(null);
+    try {
+      const overrides = Object.entries(rowOverrides).map(([rowIndex, selectedAction]) => ({
+        row_index: Number(rowIndex),
+        selected_action: selectedAction,
+      }));
+      const result = await confirmParticipantImport(activityId, {
+        action_id: preview.confirm_payload.action_id,
+        row_overrides: overrides,
+      });
+      setConfirmResult(result);
+      setPreview(null);
+      setFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      onUpdated();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "반영 실패");
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  async function handleCancel() {
+    if (!preview) return;
+    try {
+      await cancelParticipantImport(activityId, preview.confirm_payload.action_id);
+    } catch {
+      // ignore cancel errors
+    }
+    setPreview(null);
+    setFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setRowOverrides({});
+  }
+
+  const needsUserSelection = preview?.rows.filter(
+    (r) => r.action === "needs_user_selection" || r.match_status === "unregistered_candidate" || r.match_status === "duplicate_candidate"
+  ) ?? [];
+
+  return (
+    <div className="space-y-4">
+      <Card padding="lg">
+        <h3 className="text-sm font-semibold mb-1" style={{ color: "var(--text-main)" }}>
+          참가자 명단 Import
+        </h3>
+        <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
+          참가자 명단 또는 신청서 엑셀을 업로드합니다. 기존 부원과 대조 후 확인하면 참여자로 등록됩니다.
+        </p>
+
+        <div
+          className="flex flex-col items-center justify-center gap-2 rounded-xl p-5 text-center cursor-pointer transition-opacity hover:opacity-80 mb-3"
+          style={{
+            border: file ? "2px dashed var(--primary)" : "2px dashed var(--border-soft)",
+            background: file ? "var(--primary-soft, rgba(99,102,241,0.06))" : "var(--surface-soft)",
+          }}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          {file ? (
+            <>
+              <p className="text-sm font-medium" style={{ color: "var(--primary)" }}>{file.name}</p>
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>클릭해서 다른 파일로 변경</p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium" style={{ color: "var(--text-muted)" }}>엑셀 파일 선택</p>
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>.xlsx · .xls · .csv</p>
+            </>
+          )}
+        </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".xlsx,.xls,.csv"
+          className="hidden"
+          onChange={(e) => {
+            setFile(e.target.files?.[0] ?? null);
+            setPreview(null);
+            setConfirmResult(null);
+            setError(null);
+            setRowOverrides({});
+          }}
+        />
+
+        <Button onClick={handlePreview} disabled={!file || previewing} loading={previewing}>
+          {previewing ? "분석 중..." : "분석하기"}
+        </Button>
+      </Card>
+
+      {error && (
+        <Card padding="md">
+          <p className="text-sm" style={{ color: "var(--danger)" }}>{error}</p>
+        </Card>
+      )}
+
+      {confirmResult && (
+        <Card padding="md">
+          <p className="text-sm font-medium mb-2" style={{ color: "var(--success)" }}>참여자 반영 완료</p>
+          <div className="text-xs space-y-1" style={{ color: "var(--text-muted)" }}>
+            <p>신규 참여자: {confirmResult.result.created_participants}명</p>
+            <p>갱신된 참여자: {confirmResult.result.updated_participants}명</p>
+            <p>이미 참여자: {confirmResult.result.already_participants}명</p>
+            {confirmResult.result.external_participants > 0 && (
+              <p>외부인 참가자: {confirmResult.result.external_participants}명</p>
+            )}
+            {confirmResult.result.ignored_rows > 0 && (
+              <p>무시된 행: {confirmResult.result.ignored_rows}개</p>
+            )}
+            {confirmResult.result.created_members > 0 && (
+              <p>신규 부원 생성: {confirmResult.result.created_members}명</p>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {preview && (
+        <Card padding="lg">
+          <div className="flex items-start justify-between gap-3 mb-4">
+            <div>
+              <p className="text-sm font-semibold" style={{ color: "var(--text-main)" }}>Preview</p>
+              <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                확인 후 반영을 누르면 참여자로 등록됩니다
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" variant="secondary" onClick={handleCancel} disabled={confirming}>
+                취소
+              </Button>
+              <Button size="sm" onClick={handleConfirm} disabled={confirming} loading={confirming}>
+                {confirming ? "반영 중..." : "확인 후 반영"}
+              </Button>
+            </div>
+          </div>
+
+          {/* Summary */}
+          <div className="grid grid-cols-3 gap-2 mb-4">
+            {[
+              ["전체 행", preview.summary.total_rows + "명"],
+              ["기존 부원 연결", preview.summary.matched_members + "명"],
+              ["미등록 후보", preview.summary.unregistered_candidates + "명"],
+              ["이미 참가자", preview.summary.already_participants + "명"],
+              ["중복 후보", preview.summary.duplicate_candidates + "명"],
+              ["반영 예정", preview.summary.will_create_participants + "명"],
+            ].map(([label, val]) => (
+              <div key={label} className="rounded-lg p-2 text-center" style={{ background: "var(--surface-hover)" }}>
+                <p className="text-xs" style={{ color: "var(--text-muted)" }}>{label}</p>
+                <p className="text-sm font-semibold" style={{ color: "var(--text-main)" }}>{val}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Unregistered/duplicate rows requiring user action */}
+          {needsUserSelection.length > 0 && (
+            <div className="mb-4 p-3 rounded-xl" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+              <p className="text-xs font-semibold mb-2" style={{ color: "var(--warning, #b45309)" }}>
+                처리 선택 필요 ({needsUserSelection.length}명)
+              </p>
+              <div className="space-y-2">
+                {needsUserSelection.map((row) => (
+                  <div key={row.row_index} className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-medium" style={{ color: "var(--text-main)", minWidth: 60 }}>
+                      {row.name ?? "-"}
+                    </span>
+                    <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+                      {row.student_id ?? "-"}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded text-xs" style={{
+                      background: MATCH_STATUS_COLOR[row.match_status]?.bg ?? "#f3f4f6",
+                      color: MATCH_STATUS_COLOR[row.match_status]?.color ?? "var(--text-muted)",
+                    }}>
+                      {MATCH_STATUS_LABEL[row.match_status] ?? row.match_status}
+                    </span>
+                    <select
+                      value={rowOverrides[row.row_index] ?? row.available_actions[0] ?? "ignore"}
+                      onChange={(e) => setRowOverrides((prev) => ({ ...prev, [row.row_index]: e.target.value }))}
+                      className="rounded px-2 py-1 text-xs focus:outline-none"
+                      style={{ background: "var(--surface)", color: "var(--text-main)", border: "1px solid var(--border-soft)" }}
+                    >
+                      {row.available_actions.map((a) => (
+                        <option key={a} value={a}>
+                          {UNREGISTERED_ACTION_LABEL[a] ?? a}
+                          {a === "create_new_member" ? " ⚠" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Row table */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs" style={{ borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--border-soft)" }}>
+                  {["#", "이름", "학번", "학과", "매칭 상태", "처리 예정"].map((h) => (
+                    <th key={h} className="text-left py-1 px-2 font-medium" style={{ color: "var(--text-muted)" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {preview.rows.slice(0, 50).map((row) => {
+                  const effectiveAction = rowOverrides[row.row_index] ?? row.action;
+                  return (
+                    <tr key={row.row_index} style={{ borderBottom: "1px solid var(--border-soft)" }}>
+                      <td className="py-1 px-2" style={{ color: "var(--text-muted)" }}>{row.row_index}</td>
+                      <td className="py-1 px-2 font-medium" style={{ color: "var(--text-main)" }}>{row.name ?? "-"}</td>
+                      <td className="py-1 px-2" style={{ color: "var(--text-muted)" }}>{row.student_id ?? "-"}</td>
+                      <td className="py-1 px-2" style={{ color: "var(--text-muted)" }}>{row.department ?? "-"}</td>
+                      <td className="py-1 px-2">
+                        <span className="px-1.5 py-0.5 rounded text-xs" style={{
+                          background: MATCH_STATUS_COLOR[row.match_status]?.bg ?? "#f3f4f6",
+                          color: MATCH_STATUS_COLOR[row.match_status]?.color ?? "var(--text-muted)",
+                        }}>
+                          {MATCH_STATUS_LABEL[row.match_status] ?? row.match_status}
+                        </span>
+                      </td>
+                      <td className="py-1 px-2">
+                        <span className="px-1.5 py-0.5 rounded text-xs" style={{ background: "var(--surface-hover)", color: "var(--text-muted)" }}>
+                          {UNREGISTERED_ACTION_LABEL[effectiveAction] ?? effectiveAction}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {preview.rows.length > 50 && (
+              <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
+                +{preview.rows.length - 50}행 더 있습니다.
+              </p>
+            )}
+          </div>
+        </Card>
+      )}
+    </div>
   );
 }
 
@@ -1130,6 +2310,8 @@ type AIRun = {
   id: string;
   requestMessage: string;
   response: AssistantExecuteResponse;
+  status?: "preview" | "applied" | "failed" | "cancelled";
+  applying?: boolean;
 };
 
 function AIWorkTab({
@@ -1171,9 +2353,13 @@ function AIWorkTab({
       setRuns((prev) => [{ id: nanoid(), requestMessage: message || files.map((f) => f.name).join(", "), response: res }, ...prev]);
       setMessage("");
       setFiles([]);
-      // Refresh activity detail after AI work
-      if (res.result_type !== "error") {
-        setTimeout(() => onUpdated(), 800);
+      // Refresh activity detail after any successful AI work so fees/files/checklist update
+      const ALWAYS_REFETCH_TYPES = [
+        "activity_fee_generation_result", "payment_manual_update_result",
+        "receipt_analysis", "activity_report_draft", "activity_import_result",
+      ];
+      if (res.result_type !== "error" && ALWAYS_REFETCH_TYPES.includes(res.result_type)) {
+        setTimeout(() => onUpdated(), 600);
       }
     } catch (err: unknown) {
       setRunError(err instanceof Error ? err.message : "요청 처리 중 오류가 발생했습니다.");
@@ -1187,6 +2373,56 @@ function AIWorkTab({
     "이 영수증을 이 활동 증빙으로 연결해줘",
     "참여자 기준으로 활동비 10000원 납부 대상 만들어줘",
   ];
+
+  async function handleApply(runId: string) {
+    const run = runs.find((item) => item.id === runId);
+    const actionId = run?.response.apply_payload?.action_id;
+    if (typeof actionId !== "string") {
+      setRunError("반영할 action_id를 찾지 못했습니다.");
+      return;
+    }
+    setRuns((prev) => prev.map((item) => item.id === runId ? { ...item, applying: true } : item));
+    setRunError(null);
+    try {
+      const applied = await confirmAssistantAction(actionId);
+      setRuns((prev) => prev.map((item) => {
+        if (item.id !== runId) return item;
+        return {
+          ...item,
+          applying: false,
+          status: "applied",
+          response: {
+            ...item.response,
+            requires_confirmation: false,
+            message: "확인 후 반영이 완료되었습니다.",
+            result: { ...item.response.result, applied_result: applied.result ?? {}, proposal_status: applied.status },
+          },
+        };
+      }));
+      setTimeout(() => onUpdated(), 300);
+    } catch (err: unknown) {
+      setRunError(err instanceof Error ? err.message : "반영에 실패했습니다.");
+      setRuns((prev) => prev.map((item) => item.id === runId ? { ...item, applying: false, status: "failed" } : item));
+    }
+  }
+
+  async function handleCancel(runId: string) {
+    const run = runs.find((item) => item.id === runId);
+    const actionId = run?.response.apply_payload?.action_id;
+    if (typeof actionId !== "string") {
+      setRunError("취소할 action_id를 찾지 못했습니다.");
+      return;
+    }
+    setRuns((prev) => prev.map((item) => item.id === runId ? { ...item, applying: true } : item));
+    setRunError(null);
+    try {
+      await cancelAssistantAction(actionId);
+      setRuns((prev) => prev.map((item) => item.id === runId ? { ...item, applying: false, status: "cancelled" } : item));
+    } catch (err: unknown) {
+      setRunError(err instanceof Error ? err.message : "취소에 실패했습니다.");
+      setRuns((prev) => prev.map((item) => item.id === runId ? { ...item, applying: false } : item));
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -1275,8 +2511,11 @@ function AIWorkTab({
             <AssistantResultCard
               key={run.id}
               response={run.response}
-              status={run.response.result_type === "error" ? "failed" : run.response.requires_confirmation ? "preview" : "applied"}
+              status={run.status ?? (run.response.result_type === "error" ? "failed" : run.response.requires_confirmation ? "preview" : "applied")}
               requestMessage={run.requestMessage}
+              applying={run.applying}
+              onApplyClick={() => handleApply(run.id)}
+              onCancel={() => handleCancel(run.id)}
             />
           ))}
         </div>
@@ -1297,10 +2536,12 @@ export default function ActivityDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     if (!activityId) return;
-    setLoading(true);
+    // Only show full-screen loader on first load. Background refreshes (onUpdated calls)
+    // update data silently so mounted tabs keep their local state (e.g. AI run results).
     setError(null);
     try {
       const [d, cats] = await Promise.all([
@@ -1333,6 +2574,21 @@ export default function ActivityDetailPage() {
   const { activity, checklist } = detail;
 
   const completedCount = checklist.filter((c) => c.done).length;
+
+  async function handleDeleteActivity() {
+    const ok = window.confirm(
+      "이 활동을 삭제하시겠습니까?\n참여자, 파일, 납부 기록은 복구를 위해 보관되지만 활동 목록에서는 보이지 않습니다.",
+    );
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      await deleteActivity(activityId);
+      router.push("/activities");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "활동 삭제에 실패했습니다.");
+      setDeleting(false);
+    }
+  }
 
   return (
     <AppShell>
@@ -1379,15 +2635,21 @@ export default function ActivityDetailPage() {
                 </span>
               </div>
             </div>
-            {/* Checklist progress */}
-            <div
-              className="rounded-xl px-4 py-2.5 text-center"
-              style={{ background: "var(--surface)", border: "1px solid var(--border-soft)" }}
-            >
-              <p className="text-xs mb-0.5" style={{ color: "var(--text-muted)" }}>처리 완료</p>
-              <p className="text-lg font-semibold" style={{ color: "var(--text-main)" }}>
-                {completedCount}/{checklist.length}
-              </p>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" onClick={handleDeleteActivity} disabled={deleting} loading={deleting}>
+                <Trash2 className="h-4 w-4" />
+                삭제
+              </Button>
+              {/* Checklist progress */}
+              <div
+                className="rounded-xl px-4 py-2.5 text-center"
+                style={{ background: "var(--surface)", border: "1px solid var(--border-soft)" }}
+              >
+                <p className="text-xs mb-0.5" style={{ color: "var(--text-muted)" }}>처리 완료</p>
+                <p className="text-lg font-semibold" style={{ color: "var(--text-main)" }}>
+                  {completedCount}/{checklist.length}
+                </p>
+              </div>
             </div>
           </div>
         </div>
@@ -1437,7 +2699,7 @@ export default function ActivityDetailPage() {
             <ReportTab activityId={activityId} detail={detail} onUpdated={load} />
           )}
           {activeTab === "fees" && (
-            <FeesTab
+            <ActivityFeeTab
               activityId={activityId}
               feeInfo={detail.activity_fee}
               onUpdated={load}
@@ -1450,9 +2712,14 @@ export default function ActivityDetailPage() {
               onUpdated={load}
             />
           )}
-          {activeTab === "attachments" && <AttachmentsTab />}
+          {activeTab === "files" && (
+            <FileVaultTab activityId={activityId} onUpdated={load} />
+          )}
           {activeTab === "ai" && (
             <AIWorkTab activityId={activityId} onUpdated={load} />
+          )}
+          {activeTab === "import" && (
+            <ParticipantImportTab activityId={activityId} onUpdated={load} />
           )}
         </div>
       </div>

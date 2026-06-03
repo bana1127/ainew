@@ -18,6 +18,12 @@ from app.schemas.activity import (
 )
 from app.schemas.file import UploadedFileCreate, UploadedFileRead, UploadedFileUpdate
 from app.schemas.member import MemberCreate, MemberRead, MemberUpdate
+from app.schemas.membership_fee import (
+    MembershipFeePreviewPayload,
+    MembershipFeePreviewResponse,
+    MembershipFeePreviewRow,
+    MembershipFeePreviewSummary,
+)
 from app.schemas.notification import (
     NotificationCreate,
     NotificationRead,
@@ -72,6 +78,10 @@ __all__ = [
     "MemberCreate",
     "MemberRead",
     "MemberUpdate",
+    "MembershipFeePreviewPayload",
+    "MembershipFeePreviewResponse",
+    "MembershipFeePreviewRow",
+    "MembershipFeePreviewSummary",
     "NotificationCreate",
     "NotificationRead",
     "NotificationUpdate",

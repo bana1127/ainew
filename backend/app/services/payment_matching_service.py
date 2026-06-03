@@ -56,6 +56,14 @@ class TransactionMatchItem:
     match_status: str
     score: float | None
     reason: str | None
+    activity_id: UUID | None = None
+    activity_title: str | None = None
+    match_mode: str | None = None
+    expected_amount: int | None = None
+    amount_difference: int | None = None
+    amount_status: str | None = None
+    auto_match: bool = False
+    fee_tier: str | None = None
 
 
 @dataclass
@@ -350,6 +358,300 @@ def classify_transaction(
         return "other"
 
 
+def evaluate_membership_fee_match_gate(
+    *,
+    deposit_amount: int,
+    required_amount: int | None,
+    has_payment_record: bool,
+    record_status: str | None,
+    existing_paid_amount: int,
+    name_status: str,
+    transaction_already_matched: bool = False,
+) -> tuple[str, str, bool]:
+    """Return (match_status, amount_status, auto_match) for membership fees.
+
+    Membership fee auto matching is intentionally strict: a transaction may be
+    auto-applied only when the member already has a PaymentRecord, the record is
+    unsettled, and deposit_amount exactly equals that record's required_amount.
+    """
+    if transaction_already_matched:
+        return "need_check", "already_matched", False
+    if not has_payment_record or required_amount is None:
+        return "need_check", "missing_payment_record", False
+    if record_status in ("paid", "exempt") or existing_paid_amount > 0:
+        return "need_check", "already_paid", False
+    if required_amount <= 0:
+        return "need_check", "amount_mismatch_overpaid", False
+    if deposit_amount < required_amount:
+        return "need_check", "amount_mismatch_partial", False
+    if deposit_amount > required_amount:
+        return "need_check", "amount_mismatch_overpaid", False
+    if name_status != "matched":
+        return "need_check", "name_check_required", False
+    return "matched", "exact_amount", True
+
+
+def _membership_fee_reason(amount_status: str, member_name: str | None = None) -> str:
+    name = f"{member_name} " if member_name else ""
+    reasons = {
+        "exact_amount": f"{name}회비 필요 금액과 입금액이 정확히 일치",
+        "amount_mismatch_partial": f"{name}회비 금액 불일치: 부분 납부 후보",
+        "amount_mismatch_overpaid": f"{name}회비 금액 불일치: 초과 입금 또는 임원 입금 확인 필요",
+        "amount_mismatch": f"{name}회비 금액 불일치",
+        "missing_payment_record": f"{name}회비 PaymentRecord가 없어 자동 매칭 불가",
+        "already_paid": f"{name}이미 납부 완료 또는 납부 금액이 있어 확인 필요",
+        "already_matched": "이미 다른 납부 기록에 연결된 거래내역",
+        "name_check_required": "금액은 일치하지만 납부자 이름 확인 필요",
+    }
+    return reasons.get(amount_status, amount_status)
+
+
+def _score_activity_fee_transaction(
+    memo: str | None,
+    deposit_amount: int,
+    member: Member,
+    payment_record: PaymentRecord,
+    activity_title: str | None,
+) -> float:
+    """Score a transaction against an activity_fee payment record."""
+    score = 0.0
+    if not memo:
+        return score
+
+    memo_norm = normalize_memo(memo)
+    memo_stripped = memo.strip()
+
+    # Student ID match — strongest signal
+    if member.student_id and member.student_id in memo_stripped:
+        score += 4.0
+
+    # Name match
+    if member.name and member.name in memo_norm:
+        score += 3.0
+    elif member.name:
+        ratio = difflib.SequenceMatcher(None, member.name, memo_norm).ratio()
+        if ratio >= 0.8:
+            score += 2.0
+
+    # Amount match
+    if payment_record.required_amount > 0 and deposit_amount == payment_record.required_amount:
+        score += 2.0
+
+    # Activity title in memo
+    if activity_title:
+        # Try partial title match
+        short_title = activity_title[:4] if len(activity_title) >= 4 else activity_title
+        if short_title and short_title in memo_stripped:
+            score += 1.0
+
+    return score
+
+
+def _run_activity_fee_matching(
+    db: Session,
+    activity_id: UUID,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[
+    list[TransactionMatchItem],
+    list[TransactionMatchItem],
+    list[TransactionMatchItem],
+    list[Member],
+]:
+    """Match transactions against activity_fee payment records for a specific activity."""
+    from app.models.activity import ActivityReport  # lazy import to avoid test stub issues
+
+    _, _, threshold, _ = _get_settings(db)
+
+    activity = db.get(ActivityReport, activity_id)
+    activity_title = activity.title if activity else None
+    period_key = f"act-{str(activity_id)[:8]}"
+
+    # Get activity_fee payment records for this activity
+    fee_records: list[PaymentRecord] = list(db.scalars(
+        select(PaymentRecord).where(
+            and_(
+                PaymentRecord.period == period_key,
+                PaymentRecord.payment_type == "activity_fee",
+            )
+        )
+    ))
+
+    # Build member map from fee records
+    member_ids = {r.member_id for r in fee_records}
+    members: list[Member] = list(db.scalars(
+        select(Member).where(Member.id.in_(member_ids))
+    )) if member_ids else []
+    member_map: dict[UUID, Member] = {m.id: m for m in members}
+
+    # Get deposit transactions
+    query = select(BankTransaction).where(
+        and_(
+            BankTransaction.deposit_amount > 0,
+            BankTransaction.match_status != "excluded",
+        )
+    )
+    if start_date is not None:
+        query = query.where(
+            BankTransaction.transaction_datetime >= datetime.combine(start_date, datetime.min.time())
+        )
+    if end_date is not None:
+        query = query.where(
+            BankTransaction.transaction_datetime <= datetime.combine(end_date, datetime.max.time())
+        )
+    transactions: list[BankTransaction] = list(db.scalars(query))
+
+    # Filter out already-paid/exempt records from candidates
+    unpaid_records = [
+        r for r in fee_records
+        if r.status not in ("paid", "exempt")
+    ]
+    unpaid_member_ids = {r.member_id for r in unpaid_records}
+    unpaid_members_list = [member_map[mid] for mid in unpaid_member_ids if mid in member_map]
+
+    matched_items: list[TransactionMatchItem] = []
+    need_check_items: list[TransactionMatchItem] = []
+    excluded_items: list[TransactionMatchItem] = []
+
+    matched_member_ids: set[UUID] = set()
+
+    for txn in transactions:
+        memo = txn.memo
+
+        # Check exclusion
+        excluded, exc_payment_type = is_excluded_transaction(memo, txn.transaction_type)
+        if excluded:
+            excluded_items.append(TransactionMatchItem(
+                transaction_id=txn.id,
+                transaction_datetime=txn.transaction_datetime,
+                memo=memo,
+                deposit_amount=txn.deposit_amount or 0,
+                matched_member_id=None,
+                matched_member_name=None,
+                payment_type=exc_payment_type,
+                match_status="excluded",
+                score=None,
+                reason="제외 키워드 감지",
+                activity_id=activity_id,
+                activity_title=activity_title,
+                match_mode="selected_activity_fee",
+            ))
+            continue
+
+        # Score each unpaid fee record
+        scored: list[tuple[float, Member, PaymentRecord]] = []
+        for rec in unpaid_records:
+            member = member_map.get(rec.member_id)
+            if not member:
+                continue
+            s = _score_activity_fee_transaction(
+                memo, txn.deposit_amount or 0, member, rec, activity_title
+            )
+            if s > 0:
+                scored.append((s, member, rec))
+
+        if not scored:
+            need_check_items.append(TransactionMatchItem(
+                transaction_id=txn.id,
+                transaction_datetime=txn.transaction_datetime,
+                memo=memo,
+                deposit_amount=txn.deposit_amount or 0,
+                matched_member_id=None,
+                matched_member_name=None,
+                payment_type="activity_fee",
+                match_status="unmatched",
+                score=0.0,
+                reason="활동비 납부자 불일치",
+                activity_id=activity_id,
+                activity_title=activity_title,
+                match_mode="selected_activity_fee",
+                amount_status="name_check_required",
+                auto_match=False,
+            ))
+            continue
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_member, best_rec = scored[0]
+        deposit_amount = int(txn.deposit_amount or 0)
+        expected_amount = int(best_rec.required_amount or 0)
+        amount_difference = deposit_amount - expected_amount
+        if deposit_amount != expected_amount:
+            amount_status = (
+                "amount_mismatch_partial"
+                if deposit_amount < expected_amount
+                else "amount_mismatch_overpaid"
+            )
+            need_check_items.append(TransactionMatchItem(
+                transaction_id=txn.id,
+                transaction_datetime=txn.transaction_datetime,
+                memo=memo,
+                deposit_amount=deposit_amount,
+                matched_member_id=best_member.id,
+                matched_member_name=best_member.name,
+                payment_type="activity_fee",
+                match_status="need_check",
+                score=round(best_score, 2),
+                reason=f"활동비 금액 불일치: 필요 {expected_amount:,}원 / 입금 {deposit_amount:,}원",
+                activity_id=activity_id,
+                activity_title=activity_title,
+                match_mode="selected_activity_fee",
+                expected_amount=expected_amount,
+                amount_difference=amount_difference,
+                amount_status=amount_status,
+                auto_match=False,
+            ))
+            continue
+
+        if len(scored) == 1 or scored[0][0] > scored[1][0] + 1.0:
+            # Clear winner
+            matched_items.append(TransactionMatchItem(
+                transaction_id=txn.id,
+                transaction_datetime=txn.transaction_datetime,
+                memo=memo,
+                deposit_amount=deposit_amount,
+                matched_member_id=best_member.id,
+                matched_member_name=best_member.name,
+                payment_type="activity_fee",
+                match_status="matched",
+                score=round(best_score, 2),
+                reason=f"활동비 매칭: {best_member.name} (점수 {best_score:.1f})",
+                activity_id=activity_id,
+                activity_title=activity_title,
+                match_mode="selected_activity_fee",
+                expected_amount=expected_amount,
+                amount_difference=amount_difference,
+                amount_status="exact_amount",
+                auto_match=True,
+            ))
+            matched_member_ids.add(best_member.id)
+        else:
+            candidates_str = ", ".join(m.name for _, m, _ in scored[:3])
+            need_check_items.append(TransactionMatchItem(
+                transaction_id=txn.id,
+                transaction_datetime=txn.transaction_datetime,
+                memo=memo,
+                deposit_amount=deposit_amount,
+                matched_member_id=best_member.id,
+                matched_member_name=best_member.name,
+                payment_type="activity_fee",
+                match_status="need_check",
+                score=round(best_score, 2),
+                reason=f"복수 후보: {candidates_str}",
+                activity_id=activity_id,
+                activity_title=activity_title,
+                match_mode="selected_activity_fee",
+                expected_amount=expected_amount,
+                amount_difference=amount_difference,
+                amount_status="name_check_required",
+                auto_match=False,
+            ))
+
+    unpaid_fee_members: list[Member] = [
+        m for m in unpaid_members_list if m.id not in matched_member_ids
+    ]
+    return matched_items, need_check_items, excluded_items, unpaid_fee_members
+
+
 def _run_matching(
     db: Session,
     period: str,
@@ -397,6 +699,25 @@ def _run_matching(
         if member.student_id:
             student_id_map[member.student_id] = member
 
+    membership_record_map: dict[UUID, PaymentRecord] = {}
+    linked_transaction_ids: set[UUID] = set()
+    if payment_type == "membership_fee":
+        member_ids = {m.id for m in active_members}
+        if member_ids:
+            membership_records = list(db.scalars(
+                select(PaymentRecord).where(
+                    and_(
+                        PaymentRecord.period == period,
+                        PaymentRecord.payment_type == "membership_fee",
+                        PaymentRecord.member_id.in_(member_ids),
+                    )
+                )
+            ))
+            membership_record_map = {r.member_id: r for r in membership_records}
+            linked_transaction_ids = {
+                r.transaction_id for r in membership_records if r.transaction_id is not None
+            }
+
     matched_items: list[TransactionMatchItem] = []
     need_check_items: list[TransactionMatchItem] = []
     excluded_items: list[TransactionMatchItem] = []
@@ -429,6 +750,74 @@ def _run_matching(
         matched_member, score, match_status, reason = match_member_from_memo(
             memo, student_id_map, active_members, threshold
         )
+
+        if payment_type == "membership_fee":
+            deposit_amount = int(txn.deposit_amount or 0)
+            transaction_already_matched = txn.id in linked_transaction_ids
+            if matched_member:
+                fee_record = membership_record_map.get(matched_member.id)
+                required_for_member = int(fee_record.required_amount) if fee_record else None
+                status, amount_status, auto_match = evaluate_membership_fee_match_gate(
+                    deposit_amount=deposit_amount,
+                    required_amount=required_for_member,
+                    has_payment_record=fee_record is not None,
+                    record_status=getattr(fee_record, "status", None) if fee_record else None,
+                    existing_paid_amount=int(getattr(fee_record, "paid_amount", 0) or 0) if fee_record else 0,
+                    name_status=match_status,
+                    transaction_already_matched=transaction_already_matched,
+                )
+                item = TransactionMatchItem(
+                    transaction_id=txn.id,
+                    transaction_datetime=txn.transaction_datetime,
+                    memo=memo,
+                    deposit_amount=deposit_amount,
+                    matched_member_id=matched_member.id,
+                    matched_member_name=matched_member.name,
+                    payment_type="membership_fee",
+                    match_status=status,
+                    score=score,
+                    reason=_membership_fee_reason(amount_status, matched_member.name),
+                    expected_amount=required_for_member,
+                    amount_difference=deposit_amount - required_for_member if required_for_member is not None else None,
+                    amount_status=amount_status,
+                    auto_match=auto_match,
+                    fee_tier=getattr(fee_record, "fee_tier", None) if fee_record else None,
+                )
+                if auto_match:
+                    matched_items.append(item)
+                    matched_member_ids.add(matched_member.id)
+                else:
+                    need_check_items.append(item)
+                continue
+
+            exact_amount_candidates = [
+                (m, r) for m in active_members
+                if (r := membership_record_map.get(m.id)) is not None
+                and r.status not in ("paid", "exempt")
+                and int(r.paid_amount or 0) == 0
+                and int(r.required_amount or 0) == deposit_amount
+            ]
+            if exact_amount_candidates:
+                candidate_member, candidate_record = exact_amount_candidates[0]
+                amount_status = "name_check_required"
+                need_check_items.append(TransactionMatchItem(
+                    transaction_id=txn.id,
+                    transaction_datetime=txn.transaction_datetime,
+                    memo=memo,
+                    deposit_amount=deposit_amount,
+                    matched_member_id=candidate_member.id,
+                    matched_member_name=candidate_member.name,
+                    payment_type="membership_fee",
+                    match_status="need_check",
+                    score=score if score else None,
+                    reason=_membership_fee_reason(amount_status, candidate_member.name),
+                    expected_amount=int(candidate_record.required_amount or 0),
+                    amount_difference=deposit_amount - int(candidate_record.required_amount or 0),
+                    amount_status=amount_status,
+                    auto_match=False,
+                    fee_tier=getattr(candidate_record, "fee_tier", None),
+                ))
+                continue
 
         # Determine payment_type for this transaction
         detected_payment_type = classify_transaction(
@@ -494,6 +883,8 @@ def preview_payment_matching(
     required_amount: int | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
+    match_mode: str = "auto",
+    activity_id: UUID | None = None,
 ) -> PaymentMatchingPreview:
     """
     Preview payment matching results WITHOUT modifying the database.
@@ -502,9 +893,15 @@ def preview_payment_matching(
     if required_amount is None:
         required_amount = membership_fee
 
-    matched_items, need_check_items, excluded_items, unpaid_members = _run_matching(
-        db, period, payment_type, required_amount, start_date, end_date
-    )
+    if match_mode == "selected_activity_fee" and activity_id:
+        matched_items, need_check_items, excluded_items, unpaid_members = _run_activity_fee_matching(
+            db, activity_id, start_date, end_date
+        )
+        payment_type = "activity_fee"
+    else:
+        matched_items, need_check_items, excluded_items, unpaid_members = _run_matching(
+            db, period, payment_type, required_amount, start_date, end_date
+        )
 
     # Count total active members
     total_active = db.execute(
@@ -565,6 +962,8 @@ def apply_payment_matching(
     required_amount: int | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
+    match_mode: str = "auto",
+    activity_id: UUID | None = None,
 ) -> PaymentMatchingResult:
     """
     Run payment matching and persist results to the database.
@@ -575,9 +974,17 @@ def apply_payment_matching(
     if required_amount is None:
         required_amount = membership_fee
 
-    matched_items, need_check_items, excluded_items, unpaid_members = _run_matching(
-        db, period, payment_type, required_amount, start_date, end_date
-    )
+    if match_mode == "selected_activity_fee" and activity_id:
+        matched_items, need_check_items, excluded_items, unpaid_members = _run_activity_fee_matching(
+            db, activity_id, start_date, end_date
+        )
+        payment_type = "activity_fee"
+        # Use the activity's period_key for records
+        period = f"act-{str(activity_id)[:8]}"
+    else:
+        matched_items, need_check_items, excluded_items, unpaid_members = _run_matching(
+            db, period, payment_type, required_amount, start_date, end_date
+        )
 
     # Count totals for result
     total_active = db.execute(
@@ -648,11 +1055,20 @@ def apply_payment_matching(
         ).scalar_one_or_none()
 
         if existing is not None:
+            if payment_type == "membership_fee":
+                if (
+                    existing.status in ("paid", "exempt")
+                    or int(existing.paid_amount or 0) > 0
+                    or item.deposit_amount != int(existing.required_amount or 0)
+                ):
+                    continue
             existing.paid_amount = item.deposit_amount
             existing.status = "paid"
             existing.transaction_id = item.transaction_id
             updated_records += 1
         else:
+            if payment_type == "membership_fee":
+                continue
             new_record = PaymentRecord(
                 member_id=item.matched_member_id,
                 period=period,
@@ -683,6 +1099,8 @@ def apply_payment_matching(
                 existing.status = "unpaid"
                 updated_records += 1
         else:
+            if payment_type == "membership_fee":
+                continue
             new_record = PaymentRecord(
                 member_id=member.id,
                 period=period,

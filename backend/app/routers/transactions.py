@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.models import BankTransaction, UploadedFile
+from app.models.payment import PaymentRecord
 from app.routers.common import apply_updates, commit_or_400, get_or_404
 from app.schemas import (
     BankStatementImportResponse,
@@ -215,6 +216,149 @@ def import_transactions(
         errors=result.errors,
         warnings=result.warnings,
     )
+
+
+@router.post("/{transaction_id}/unmatch")
+def unmatch_transaction(
+    transaction_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Cancel match for a bank transaction and restore linked payment record to unpaid."""
+    transaction: BankTransaction = get_or_404(db, BankTransaction, transaction_id, "Transaction")
+
+    # Find linked payment records (a transaction can link to multiple records)
+    linked_records = list(db.scalars(
+        select(PaymentRecord).where(PaymentRecord.transaction_id == transaction_id)
+    ))
+
+    for record in linked_records:
+        record.transaction_id = None
+        # Recalculate status
+        if record.paid_amount == 0:
+            record.status = "unpaid"
+        elif record.paid_amount < record.required_amount:
+            record.status = "partial"
+        else:
+            record.status = "paid"
+
+    # Reset transaction
+    transaction.match_status = "unmatched"
+    transaction.matched_member_id = None
+
+    commit_or_400(db, "Could not unmatch transaction")
+
+    return {
+        "ok": True,
+        "transaction_id": str(transaction.id),
+        "match_status": "unmatched",
+        "unmatched_records": len(linked_records),
+    }
+
+
+# ── Task 21: Refund matching endpoints ────────────────────────────────────────
+
+from pydantic import BaseModel as _BaseModel
+
+
+class MatchRefundPayload(_BaseModel):
+    payment_record_id: str
+    refund_amount: int | None = None
+
+
+@router.post("/{transaction_id}/match-refund")
+def match_refund(
+    transaction_id: UUID,
+    payload: MatchRefundPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Match a withdraw transaction as a refund for a payment record."""
+    transaction = get_or_404(db, BankTransaction, transaction_id, "Transaction")
+
+    if transaction.withdraw_amount == 0:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=400,
+            detail="출금 거래내역만 환불로 매칭할 수 있습니다.",
+        )
+
+    from uuid import UUID as _UUID
+    from app.services.settlement_service import mark_refunded, create_adjustment_log
+
+    record_id = _UUID(payload.payment_record_id)
+    record = db.get(PaymentRecord, record_id)
+    if not record:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="PaymentRecord not found")
+
+    refund_amount = payload.refund_amount or transaction.withdraw_amount
+
+    record = mark_refunded(
+        db,
+        record_id=record_id,
+        refund_transaction_id=transaction_id,
+        refund_amount=refund_amount,
+        reason="출금 거래내역 환불 매칭",
+    )
+
+    transaction.match_status = "refund_matched"
+    transaction.matched_member_id = record.member_id
+
+    commit_or_400(db, "Could not match refund")
+    db.refresh(record)
+
+    return {
+        "ok": True,
+        "transaction_id": str(transaction_id),
+        "payment_record_id": str(record_id),
+        "refund_status": record.refund_status,
+        "refund_amount": record.refund_amount,
+        "transaction_match_status": transaction.match_status,
+    }
+
+
+@router.post("/{transaction_id}/unmatch-refund")
+def unmatch_refund(
+    transaction_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Cancel refund match for a transaction."""
+    transaction = get_or_404(db, BankTransaction, transaction_id, "Transaction")
+
+    from app.services.settlement_service import create_adjustment_log
+
+    linked = list(db.scalars(
+        select(PaymentRecord).where(
+            PaymentRecord.refund_transaction_id == transaction_id
+        )
+    ))
+
+    for record in linked:
+        prev_refund = record.refund_status
+        record.refund_transaction_id = None
+        record.refund_status = "refund_pending" if prev_refund == "refunded" else "refund_required"
+        record.refunded_at = None
+
+        create_adjustment_log(
+            db,
+            payment_record_id=record.id,
+            transaction_id=transaction_id,
+            action="refund_cancelled",
+            previous_status=prev_refund,
+            new_status=record.refund_status,
+            reason="환불 매칭 취소",
+        )
+
+    transaction.match_status = "unmatched"
+    transaction.matched_member_id = None
+
+    commit_or_400(db, "Could not unmatch refund")
+
+    return {
+        "ok": True,
+        "transaction_id": str(transaction_id),
+        "match_status": "unmatched",
+        "unmatched_refunds": len(linked),
+    }
 
 
 @router.post("", response_model=BankTransactionRead)

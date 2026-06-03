@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -43,11 +43,20 @@ def _save_file(file: UploadFile, file_type: str, db: Session) -> tuple[UploadedF
         while chunk := file.file.read(1024 * 1024):
             out.write(chunk)
 
+    from app.services.file_classification_service import classify_uploaded_file
+    classification = classify_uploaded_file(file.filename or stored_name, file.content_type)
+    size_bytes = stored_path.stat().st_size if stored_path.exists() else None
+
     record = UploadedFile(
         original_filename=file.filename or stored_name,
         stored_path=(Path("uploads") / stored_name).as_posix(),
+        stored_filename=stored_name,
         mime_type=file.content_type,
+        file_ext=suffix.lstrip(".") or None,
+        size_bytes=size_bytes,
         file_type=file_type,
+        file_category=classification.file_category,
+        file_role=classification.file_role,
         related_entity_type=None,
         related_entity_id=None,
     )
@@ -102,6 +111,9 @@ async def execute(
         file_paths.append(abs_path)
         mime_types.append(f.content_type)
 
+    logger.warning("[assistant] uploaded_files_count=%s", len(file_ids))
+    logger.warning("[assistant] saved_file_ids=%s", [str(fid) for fid in file_ids])
+
     # Parse activity_id
     parsed_activity_id: UUID | None = None
     if activity_id:
@@ -110,6 +122,18 @@ async def execute(
         except (ValueError, AttributeError):
             logger.warning("Invalid activity_id format: %s", activity_id)
 
+    # When activity_id is explicitly provided (e.g. from activity detail AI tab),
+    # pre-link uploaded files to that activity so they appear in the file vault.
+    if parsed_activity_id and file_ids:
+        for fid in file_ids:
+            record = db.get(UploadedFile, fid)
+            if record and not record.activity_report_id:
+                record.activity_report_id = parsed_activity_id
+                record.related_entity_type = "activity_report"
+                record.related_entity_id = parsed_activity_id
+        db.commit()
+
+    # Task 25: Human-in-the-loop — auto_apply is always False regardless of input.
     inp = AssistantInput(
         message=message,
         file_ids=file_ids,
@@ -117,7 +141,7 @@ async def execute(
         file_paths=file_paths,
         mime_types=mime_types,
         requested_intent=requested_intent,
-        auto_apply=auto_apply,
+        auto_apply=False,
         period=period,
         payment_type=payment_type,
         required_amount=required_amount,
@@ -127,3 +151,50 @@ async def execute(
     )
 
     return AssistantOrchestrator(db).run(inp)
+
+
+@router.post("/actions/{action_id}/confirm")
+def confirm_assistant_action(
+    action_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.services.assistant_action_service import confirm_action_proposal
+
+    try:
+        proposal, result = confirm_action_proposal(db, action_id)
+    except ValueError as exc:
+        msg = str(exc)
+        status_code = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(status_code=status_code, detail=msg)
+
+    return {
+        "ok": True,
+        "action_id": str(proposal.id),
+        "action_type": proposal.action_type,
+        "status": proposal.status,
+        "activity_id": str(proposal.activity_id) if proposal.activity_id else None,
+        "result": result,
+    }
+
+
+@router.post("/actions/{action_id}/cancel")
+def cancel_assistant_action(
+    action_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.services.assistant_action_service import cancel_action_proposal
+
+    try:
+        proposal = cancel_action_proposal(db, action_id)
+    except ValueError as exc:
+        msg = str(exc)
+        status_code = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(status_code=status_code, detail=msg)
+
+    return {
+        "ok": True,
+        "action_id": str(proposal.id),
+        "action_type": proposal.action_type,
+        "status": proposal.status,
+        "activity_id": str(proposal.activity_id) if proposal.activity_id else None,
+    }

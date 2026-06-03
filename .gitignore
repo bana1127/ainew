@@ -16,3 +16,5 @@ backend/uploads/*
 !backend/uploads/.gitkeep
 backend/app/uploads/*
 !backend/app/uploads/.gitkeep
+/data
+/img

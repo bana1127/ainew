@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -50,10 +51,61 @@ class PaymentRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("activity_reports.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Task 21: refund fields
+    refund_status: Mapped[str | None] = mapped_column(
+        String(50), default="none", nullable=True
+    )
+    refund_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    refund_transaction_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("bank_transactions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    refund_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refunded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Membership fee policy metadata
+    fee_tier: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    fee_rule_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    joined_term: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    current_term: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     member: Mapped[Member] = relationship(back_populates="payment_records")
     transaction: Mapped[BankTransaction | None] = relationship(
-        back_populates="payment_records"
+        back_populates="payment_records",
+        foreign_keys=[transaction_id],
+    )
+    refund_transaction: Mapped[BankTransaction | None] = relationship(
+        back_populates="refund_payment_records",
+        foreign_keys=[refund_transaction_id],
     )
     activity_report: Mapped[ActivityReport | None] = relationship()
 
+
+class PaymentAdjustmentLog(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "payment_adjustment_logs"
+
+    payment_record_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("payment_records.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    transaction_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("bank_transactions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    previous_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    new_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    previous_paid_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_paid_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    refund_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+    )

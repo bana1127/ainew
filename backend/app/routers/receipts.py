@@ -103,12 +103,35 @@ def link_receipt_to_activity(
     payload: ReceiptActivityLink,
     db: Session = Depends(get_db),
 ) -> Receipt:
-    """Link or unlink a receipt to an activity (activity_report)."""
+    """Link or unlink a receipt to an activity.
+
+    Also syncs the linked UploadedFile so the receipt image appears in the
+    activity file vault (증빙/파일함).
+    """
+    from app.models.file import UploadedFile
+
     receipt = get_or_404(db, Receipt, receipt_id, "Receipt")
     if payload.activity_report_id is not None:
         if db.get(ActivityReport, payload.activity_report_id) is None:
             raise HTTPException(status_code=404, detail="Activity not found")
+
     receipt.activity_report_id = payload.activity_report_id
+
+    # Sync UploadedFile so it appears in the activity file vault
+    if receipt.file_id:
+        uploaded_file = db.get(UploadedFile, receipt.file_id)
+        if uploaded_file:
+            uploaded_file.activity_report_id = payload.activity_report_id
+            if payload.activity_report_id:
+                uploaded_file.file_category = "receipt"
+                uploaded_file.file_role = "evidence"
+                uploaded_file.related_entity_type = "activity_report"
+                uploaded_file.related_entity_id = payload.activity_report_id
+            else:
+                # Unlinking: clear activity-specific context
+                uploaded_file.related_entity_type = None
+                uploaded_file.related_entity_id = None
+
     commit_or_400(db, "Could not update receipt activity link")
     db.refresh(receipt)
     return receipt

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import Date, DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from typing import Any
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -66,6 +67,7 @@ class ActivityReport(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     generated_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     category: Mapped[ActivityCategory | None] = relationship(
         back_populates="activity_reports"
@@ -92,12 +94,24 @@ class ActivityParticipant(UUIDPrimaryKeyMixin, Base):
         ForeignKey("activity_reports.id"),
         nullable=False,
     )
-    member_id: Mapped[UUID] = mapped_column(
+    # nullable: external participants have no member_id
+    member_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("members.id"),
-        nullable=False,
+        nullable=True,
     )
     role: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    raw_response_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # external participant fields (used when member_id is None)
+    external_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    external_affiliation: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    external_student_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    source_file_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("uploaded_files.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -105,4 +119,4 @@ class ActivityParticipant(UUIDPrimaryKeyMixin, Base):
     )
 
     activity_report: Mapped[ActivityReport] = relationship(back_populates="participants")
-    member: Mapped[Member] = relationship(back_populates="activity_participants")
+    member: Mapped[Member | None] = relationship(back_populates="activity_participants")
