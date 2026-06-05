@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { CalendarDays, ChevronLeft, ChevronRight, Clock, MapPin, Plus, Trash2 } from "lucide-react";
+import { CalendarDays, ChevronLeft, ChevronRight, Clock, MapPin, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -321,7 +321,7 @@ export function DashboardCalendar() {
                   >
                     {day !== null && (
                       <>
-                        <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center mb-1">
                           <button
                             className="inline-flex items-center justify-center h-5 w-5 rounded-full text-xs font-medium transition-opacity hover:opacity-75"
                             style={{
@@ -331,14 +331,6 @@ export function DashboardCalendar() {
                             onClick={() => openChoice(day)}
                           >
                             {day}
-                          </button>
-                          <button
-                            className="h-5 w-5 rounded flex items-center justify-center transition-opacity hover:opacity-75"
-                            style={{ color: "var(--text-muted)", background: "transparent" }}
-                            onClick={() => openChoice(day)}
-                            title="추가"
-                          >
-                            <Plus className="h-3 w-3" />
                           </button>
                         </div>
                         <div className="space-y-0.5">

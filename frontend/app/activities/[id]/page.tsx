@@ -1800,7 +1800,7 @@ function FilePreviewPanel({
                         </tr>
                       </thead>
                       <tbody>
-                        {sheet.rows.slice(0, 15).map((row, ri) => (
+                        {sheet.rows.map((row, ri) => (
                           <tr key={ri}>
                             {row.map((cell, ci) => (
                               <td key={ci} className="px-2 py-1 border" style={{ borderColor: "var(--border-soft)", color: "var(--text-main)" }}>{cell}</td>
@@ -1810,9 +1810,6 @@ function FilePreviewPanel({
                       </tbody>
                     </table>
                   </div>
-                  {sheet.rows.length > 15 && (
-                    <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>+{sheet.rows.length - 15}행 더 있음</p>
-                  )}
                 </div>
               ))}
             </div>

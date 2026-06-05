@@ -68,7 +68,7 @@ def _preview_excel(abs_path: Path, ext: str) -> dict[str, Any]:
         import pandas as pd  # noqa: PLC0415
 
         if ext == "csv":
-            df = pd.read_csv(abs_path, nrows=30, dtype=str, encoding_errors="replace")
+            df = pd.read_csv(abs_path, dtype=str, encoding_errors="replace")
             return {
                 "type": "excel",
                 "sheets": [
@@ -77,7 +77,7 @@ def _preview_excel(abs_path: Path, ext: str) -> dict[str, Any]:
                         "headers": list(df.columns),
                         "rows": [
                             [str(v) if v is not None and v == v else "" for v in row]
-                            for row in df.values.tolist()[:30]
+                            for row in df.values.tolist()
                         ],
                     }
                 ],
@@ -85,15 +85,15 @@ def _preview_excel(abs_path: Path, ext: str) -> dict[str, Any]:
         else:
             xl = pd.ExcelFile(abs_path)
             sheets = []
-            for sheet_name in xl.sheet_names[:5]:
-                df = xl.parse(sheet_name, nrows=30, dtype=str)
+            for sheet_name in xl.sheet_names:
+                df = xl.parse(sheet_name, dtype=str)
                 sheets.append(
                     {
                         "name": str(sheet_name),
                         "headers": list(df.columns),
                         "rows": [
                             [str(v) if v is not None and str(v) != "nan" else "" for v in row]
-                            for row in df.values.tolist()[:30]
+                            for row in df.values.tolist()
                         ],
                     }
                 )

@@ -5,9 +5,10 @@ POST /generate               — create ZIP and return download URL
 """
 from __future__ import annotations
 
+import calendar
 import io
 import zipfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -42,17 +43,16 @@ def _activities_in_month(db: Session, month: str) -> list[ActivityReport]:
     except ValueError:
         return []
 
-    from datetime import date
-    import calendar
     last_day = calendar.monthrange(year_int, mon_int)[1]
-    start = date(year_int, mon_int, 1).isoformat()
-    end = date(year_int, mon_int, last_day).isoformat()
+    start = date(year_int, mon_int, 1)
+    end = date(year_int, mon_int, last_day)
 
     return list(db.scalars(
         select(ActivityReport).where(
             and_(
                 ActivityReport.activity_date >= start,
                 ActivityReport.activity_date <= end,
+                ActivityReport.deleted_at.is_(None),
             )
         ).order_by(ActivityReport.activity_date)
     ))
