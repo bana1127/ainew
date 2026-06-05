@@ -40,6 +40,7 @@ class AssistantExecuteResponse(BaseModel):
 class AssistantChatContext(BaseModel):
     page: str | None = None
     activity_id: UUID | None = None
+    last_activity_id: UUID | None = None
     period: str | None = None
 
 

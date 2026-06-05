@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime as dt_type
+from datetime import datetime as dt_type, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
@@ -21,7 +22,9 @@ from app.schemas import (
     BankTransactionUpdate,
     ParsedBankTransactionRead,
 )
+from app.schemas.transaction import BankTransactionRead
 from app.services.bank_statement_parser import parse_bank_statement
+from app.services.quarter_service import quarter_date_range_from_str, parse_operating_quarter
 
 router = APIRouter()
 
@@ -61,11 +64,13 @@ def list_transactions(
     matched_member_id: UUID | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    operating_quarter: str | None = Query(default=None, description="운영 분기 필터 (예: 2026-Q2)"),
     min_deposit: int | None = None,
     max_deposit: int | None = None,
     min_withdraw: int | None = None,
     max_withdraw: int | None = None,
     q: str | None = None,
+    exclude_from_budget: bool | None = None,
     db: Session = Depends(get_db),
 ) -> list[BankTransaction]:
     stmt = select(BankTransaction)
@@ -75,20 +80,36 @@ def list_transactions(
         stmt = stmt.where(BankTransaction.payment_type == payment_type)
     if matched_member_id:
         stmt = stmt.where(BankTransaction.matched_member_id == matched_member_id)
-    if start_date:
+
+    # Quarter filter takes priority over explicit start/end dates
+    if operating_quarter:
         try:
+            q_start, q_end = quarter_date_range_from_str(operating_quarter)
+            from datetime import datetime, timezone
             stmt = stmt.where(
-                BankTransaction.transaction_datetime >= dt_type.fromisoformat(start_date)
+                BankTransaction.transaction_datetime >= datetime.combine(q_start, dt_type.min.time())
             )
-        except ValueError:
-            pass
-    if end_date:
-        try:
             stmt = stmt.where(
-                BankTransaction.transaction_datetime <= dt_type.fromisoformat(end_date)
+                BankTransaction.transaction_datetime <= datetime.combine(q_end, dt_type.max.time())
             )
-        except ValueError:
-            pass
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    else:
+        if start_date:
+            try:
+                stmt = stmt.where(
+                    BankTransaction.transaction_datetime >= dt_type.fromisoformat(start_date)
+                )
+            except ValueError:
+                pass
+        if end_date:
+            try:
+                stmt = stmt.where(
+                    BankTransaction.transaction_datetime <= dt_type.fromisoformat(end_date)
+                )
+            except ValueError:
+                pass
+
     if min_deposit is not None:
         stmt = stmt.where(BankTransaction.deposit_amount >= min_deposit)
     if max_deposit is not None:
@@ -97,6 +118,8 @@ def list_transactions(
         stmt = stmt.where(BankTransaction.withdraw_amount >= min_withdraw)
     if max_withdraw is not None:
         stmt = stmt.where(BankTransaction.withdraw_amount <= max_withdraw)
+    if exclude_from_budget is not None:
+        stmt = stmt.where(BankTransaction.exclude_from_budget.is_(exclude_from_budget))
     if q:
         pattern = f"%{q}%"
         stmt = stmt.where(
@@ -403,3 +426,168 @@ def delete_transaction(
     db.delete(transaction)
     commit_or_400(db, "Could not delete transaction")
     return transaction
+
+
+# ── Task 43: Budget exclusion endpoints ───────────────────────────────────────
+
+class BudgetExcludePayload(BaseModel):
+    exclude_from_budget: bool | None = None
+    exclude_from_income: bool | None = None
+    exclude_from_expense: bool | None = None
+    reason: str | None = None
+
+
+@router.post("/{transaction_id}/budget-exclude")
+def budget_exclude_transaction(
+    transaction_id: UUID,
+    payload: BudgetExcludePayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    """수입/지출/예산 집계에서 거래 제외. 원본 거래내역은 유지됩니다."""
+    from datetime import datetime, timezone as tz
+
+    transaction = get_or_404(db, BankTransaction, transaction_id, "Transaction")
+
+    if payload.exclude_from_budget is not None:
+        transaction.exclude_from_budget = payload.exclude_from_budget
+    if payload.exclude_from_income is not None:
+        transaction.exclude_from_income = payload.exclude_from_income
+    if payload.exclude_from_expense is not None:
+        transaction.exclude_from_expense = payload.exclude_from_expense
+    if payload.reason is not None:
+        transaction.exclude_reason = payload.reason
+
+    any_excluded = (
+        transaction.exclude_from_budget
+        or transaction.exclude_from_income
+        or transaction.exclude_from_expense
+    )
+    if any_excluded and transaction.excluded_at is None:
+        transaction.excluded_at = datetime.now(tz.utc)
+    elif not any_excluded:
+        transaction.excluded_at = None
+        transaction.exclude_reason = None
+
+    commit_or_400(db, "Could not update budget exclusion")
+
+    return {
+        "ok": True,
+        "transaction_id": str(transaction_id),
+        "exclude_from_budget": transaction.exclude_from_budget,
+        "exclude_from_income": transaction.exclude_from_income,
+        "exclude_from_expense": transaction.exclude_from_expense,
+        "exclude_reason": transaction.exclude_reason,
+        "excluded_at": transaction.excluded_at.isoformat() if transaction.excluded_at else None,
+    }
+
+
+@router.post("/{transaction_id}/budget-include")
+def budget_include_transaction(
+    transaction_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    """예산 제외 해제 (모든 exclude 플래그 초기화)."""
+    transaction = get_or_404(db, BankTransaction, transaction_id, "Transaction")
+    transaction.exclude_from_budget = False
+    transaction.exclude_from_income = False
+    transaction.exclude_from_expense = False
+    transaction.exclude_reason = None
+    transaction.excluded_at = None
+    commit_or_400(db, "Could not clear budget exclusion")
+    return {
+        "ok": True,
+        "transaction_id": str(transaction_id),
+        "exclude_from_budget": False,
+        "exclude_from_income": False,
+        "exclude_from_expense": False,
+    }
+
+
+# ── Task 43: Manual transaction match endpoint ────────────────────────────────
+
+class ManualTransactionMatchPayload(BaseModel):
+    payment_record_id: UUID
+    payment_type: str  # "membership_fee" or "activity_fee"
+
+
+@router.post("/{transaction_id}/manual-match")
+def manual_match_transaction(
+    transaction_id: UUID,
+    payload: ManualTransactionMatchPayload,
+    db: Session = Depends(get_db),
+) -> dict:
+    """금액이 정확히 일치할 경우 이름/학번 confidence 무관하게 수동 매칭 확정.
+
+    수동 매칭:
+    - 실제 거래내역과 PaymentRecord 연결
+    - matched_transaction_id(= transaction_id) 설정
+    - paid_amount 갱신
+    - status 재계산
+    - Transaction match_status = matched
+    """
+    transaction = get_or_404(db, BankTransaction, transaction_id, "Transaction")
+    record = db.get(PaymentRecord, payload.payment_record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="PaymentRecord not found")
+
+    deposit_amount = int(transaction.deposit_amount or 0)
+    required_amount = int(record.required_amount or 0)
+    already_paid = int(record.paid_amount or 0)
+
+    # 금액 일치 확인: 입금액 == required_amount - paid_amount (또는 full required_amount)
+    remaining = required_amount - already_paid
+    if deposit_amount != required_amount and deposit_amount != remaining:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"금액 불일치: 입금액 {deposit_amount:,}원, "
+                f"필요금액 {required_amount:,}원 (미납 {remaining:,}원). "
+                "수동 매칭은 금액이 정확히 일치해야 합니다."
+            ),
+        )
+
+    # Check if transaction already matched to another record
+    already_linked = db.scalar(
+        select(PaymentRecord).where(
+            and_(
+                PaymentRecord.transaction_id == transaction_id,
+                PaymentRecord.id != record.id,
+            )
+        )
+    )
+    if already_linked is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="이 거래는 이미 다른 납부 기록에 연결되어 있습니다.",
+        )
+
+    # Update PaymentRecord
+    record.paid_amount = deposit_amount
+    record.transaction_id = transaction_id
+    record.payment_source = "manual_match"
+    # Recalculate status
+    if deposit_amount >= required_amount:
+        record.status = "paid"
+    elif deposit_amount > 0:
+        record.status = "partial"
+    else:
+        record.status = "unpaid"
+
+    # Update BankTransaction
+    transaction.match_status = "matched"
+    transaction.payment_type = payload.payment_type
+    if record.member_id:
+        transaction.matched_member_id = record.member_id
+
+    commit_or_400(db, "Could not apply manual match")
+    db.refresh(record)
+
+    return {
+        "ok": True,
+        "transaction_id": str(transaction_id),
+        "payment_record_id": str(record.id),
+        "match_status": "matched",
+        "payment_source": "manual_match",
+        "paid_amount": record.paid_amount,
+        "status": record.status,
+    }

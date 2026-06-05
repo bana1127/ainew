@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -58,6 +58,20 @@ class BankTransaction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
     )
     review_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Task 43: Budget exclusion fields
+    exclude_from_budget: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    exclude_from_income: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    exclude_from_expense: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    exclude_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    excluded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     matched_member: Mapped[Member | None] = relationship(
         back_populates="bank_transactions"

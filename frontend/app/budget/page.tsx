@@ -26,7 +26,10 @@ import {
   resolveBudgetReviewItem,
   saveBudgetPlan,
   updateBudgetCategory,
+  downloadQuarterCsv,
+  downloadQuarterZip,
 } from "@/lib/api";
+import { QuarterFilter } from "@/components/budget/QuarterFilter";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/Button";
@@ -572,6 +575,7 @@ export default function BudgetPage() {
   const [period, setPeriod] = useState(todayYearTerm());
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [operatingQuarter, setOperatingQuarter] = useState<string>("");
   const [summary, setSummary] = useState<BudgetSummary | null>(null);
   const [cashflow, setCashflow] = useState<BudgetCashflowRow[]>([]);
   const [categories, setCategories] = useState<BudgetCategory[]>([]);
@@ -582,17 +586,23 @@ export default function BudgetPage() {
   const [activities, setActivities] = useState<ActivityReport[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
 
   const query = useMemo(() => ({
     period,
-    start_date: startDate || undefined,
-    end_date: endDate || undefined,
-  }), [period, startDate, endDate]);
+    start_date: operatingQuarter ? undefined : (startDate || undefined),
+    end_date: operatingQuarter ? undefined : (endDate || undefined),
+    operating_quarter: operatingQuarter || undefined,
+  }), [period, startDate, endDate, operatingQuarter]);
 
   async function load() {
     setLoading(true);
     setError(null);
     try {
+      const txParams = operatingQuarter
+        ? { operating_quarter: operatingQuarter }
+        : { start_date: startDate || undefined, end_date: endDate || undefined };
+
       const [s, cf, cats, rows, reviews, acts, txs, activityList] = await Promise.all([
         getBudgetSummary(query),
         getBudgetCashflow(query),
@@ -600,7 +610,7 @@ export default function BudgetPage() {
         getBudgetVsActual(query),
         getBudgetReviewItems(query),
         getBudgetActivitySettlements(query),
-        getTransactionsTyped({ start_date: startDate || undefined, end_date: endDate || undefined }),
+        getTransactionsTyped(txParams),
         getActivityReportsFiltered(),
       ]);
       setSummary(s);
@@ -653,12 +663,39 @@ export default function BudgetPage() {
         />
 
         <Card padding="lg">
-          <SectionTitle title="기간 필터" hint="거래는 날짜, 미납은 학기 기간 기준으로 집계합니다." />
-          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-4">
-            <input style={inputStyle} className="min-h-[44px]" value={period} onChange={(event) => setPeriod(event.target.value)} placeholder="2026-1" />
-            <input type="date" style={inputStyle} className="min-h-[44px]" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
-            <input type="date" style={inputStyle} className="min-h-[44px]" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+          <SectionTitle title="기간 필터" hint="거래/증빙은 운영 분기 기준, 회비 미납은 학기(period) 기준으로 집계합니다." />
+          <div className="mt-4 flex flex-wrap gap-3 items-end">
+            <QuarterFilter
+              value={operatingQuarter}
+              onChange={(q) => setOperatingQuarter(q)}
+              label="운영 분기"
+            />
+            {!operatingQuarter && (
+              <>
+                <input type="date" style={{ ...inputStyle, minHeight: 44 }} value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+                <input type="date" style={{ ...inputStyle, minHeight: 44 }} value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+              </>
+            )}
+            <input style={{ ...inputStyle, minHeight: 44 }} value={period} onChange={(event) => setPeriod(event.target.value)} placeholder="회비 학기 (예: 2026-1)" title="회비 미납 집계에 사용되는 학기 기준" />
             <Button onClick={load} loading={loading}>조회</Button>
+            {operatingQuarter && (
+              <>
+                <Button
+                  variant="ghost" size="sm"
+                  disabled={exportBusy}
+                  onClick={async () => { setExportBusy(true); try { await downloadQuarterCsv(operatingQuarter); } finally { setExportBusy(false); } }}
+                >
+                  분기 CSV
+                </Button>
+                <Button
+                  variant="ghost" size="sm"
+                  disabled={exportBusy}
+                  onClick={async () => { setExportBusy(true); try { await downloadQuarterZip(operatingQuarter); } finally { setExportBusy(false); } }}
+                >
+                  분기 증빙 ZIP
+                </Button>
+              </>
+            )}
           </div>
         </Card>
 

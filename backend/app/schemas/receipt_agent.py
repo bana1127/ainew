@@ -42,3 +42,4 @@ class ReceiptAnalyzeResponse(ORMModel):
     policy: ReceiptPolicyCheckResult
     saved: bool
     model: str
+    document_type: str = "unknown"

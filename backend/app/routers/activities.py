@@ -26,12 +26,90 @@ router = APIRouter()
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+INACTIVE_PARTICIPANT_STATUSES = {"removed", "cancelled", "excluded", "deleted", "inactive"}
+INACTIVE_ACTIVITY_FEE_STATUSES = {"cancelled", "excluded"}
+
+
+def _active_participant_filter(activity_id: UUID):
+    return and_(
+        ActivityParticipant.activity_report_id == activity_id,
+        or_(
+            ActivityParticipant.status.is_(None),
+            ActivityParticipant.status.notin_(INACTIVE_PARTICIPANT_STATUSES),
+        ),
+    )
+
+
+def _is_active_participant(participant: ActivityParticipant) -> bool:
+    return (participant.status or "active") not in INACTIVE_PARTICIPANT_STATUSES
+
+
+def _is_active_fee_record(record: PaymentRecord) -> bool:
+    return (record.status or "") not in INACTIVE_ACTIVITY_FEE_STATUSES
+
+
+def _activity_period_key(activity_id: UUID) -> str:
+    return f"act-{str(activity_id)[:8]}"
+
+
+def _compute_payment_status(paid: int, required: int) -> str:
+    paid = max(0, int(paid or 0))
+    required = max(0, int(required or 0))
+    if required == 0:
+        return "exempt"
+    if paid == 0:
+        return "unpaid"
+    if paid < required:
+        return "partial"
+    if paid == required:
+        return "paid"
+    return "overpaid"
+
+
+def _load_activity_participants(db: Session, activity_id: UUID) -> list[ActivityParticipant]:
+    return list(db.scalars(
+        select(ActivityParticipant)
+        .where(_active_participant_filter(activity_id))
+        .options(selectinload(ActivityParticipant.member))
+    ))
+
+
+def _load_activity_fee_records(
+    db: Session,
+    activity_id: UUID,
+    *,
+    include_inactive: bool = False,
+) -> list[PaymentRecord]:
+    period_key = _activity_period_key(activity_id)
+    stmt = select(PaymentRecord).where(
+        and_(
+            PaymentRecord.period == period_key,
+            PaymentRecord.payment_type == "activity_fee",
+            or_(
+                PaymentRecord.activity_report_id == activity_id,
+                PaymentRecord.activity_report_id.is_(None),
+            ),
+        )
+    )
+    records = list(db.scalars(stmt))
+    if include_inactive:
+        return records
+
+    active_member_ids = {
+        p.member_id
+        for p in db.scalars(select(ActivityParticipant).where(_active_participant_filter(activity_id)))
+        if p.member_id
+    }
+    return [
+        r for r in records
+        if r.member_id in active_member_ids and _is_active_fee_record(r)
+    ]
+
+
 def _activity_summary(report: ActivityReport, db: Session) -> dict:
     """Build the summary dict for an activity card."""
     participant_count = db.scalar(
-        select(func.count(ActivityParticipant.id)).where(
-            ActivityParticipant.activity_report_id == report.id
-        )
+        select(func.count(ActivityParticipant.id)).where(_active_participant_filter(report.id))
     ) or 0
 
     receipt_rows = list(db.scalars(
@@ -40,15 +118,7 @@ def _activity_summary(report: ActivityReport, db: Session) -> dict:
     receipt_count = len(receipt_rows)
     need_check_count = sum(1 for r in receipt_rows if r.need_check)
 
-    period_key = f"act-{str(report.id)[:8]}"
-    fee_records = list(db.scalars(
-        select(PaymentRecord).where(
-            and_(
-                PaymentRecord.period == period_key,
-                PaymentRecord.payment_type == "activity_fee",
-            )
-        )
-    ))
+    fee_records = _load_activity_fee_records(db, report.id)
     if fee_records:
         paid_count = sum(1 for r in fee_records if r.status == "paid")
         activity_fee_status = f"{paid_count}/{len(fee_records)} 납부"
@@ -162,11 +232,7 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
     """Full activity detail with participants, receipts, and fee records."""
     report = _get_active_activity_or_404(db, activity_id)
 
-    participants = list(db.scalars(
-        select(ActivityParticipant)
-        .where(ActivityParticipant.activity_report_id == activity_id)
-        .options(selectinload(ActivityParticipant.member))
-    ))
+    participants = _load_activity_participants(db, activity_id)
 
     category_name: str | None = None
     if report.category_id:
@@ -177,15 +243,12 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
         select(Receipt).where(Receipt.activity_report_id == activity_id)
     ))
 
-    period_key = f"act-{str(activity_id)[:8]}"
-    fee_records = list(db.scalars(
-        select(PaymentRecord).where(
-            and_(
-                PaymentRecord.period == period_key,
-                PaymentRecord.payment_type == "activity_fee",
-            )
-        )
-    ))
+    period_key = _activity_period_key(activity_id)
+    fee_records = _load_activity_fee_records(db, activity_id, include_inactive=True)
+    active_fee_records = [
+        r for r in fee_records
+        if _is_active_fee_record(r) and any(p.member_id == r.member_id for p in participants)
+    ]
 
     fee_member_ids = {r.member_id for r in fee_records}
     fee_members: dict[UUID, Member] = {}
@@ -209,14 +272,18 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
         for r in fee_records
     ]
 
-    fee_enabled = len(fee_records) > 0
-    fee_amount = fee_records[0].required_amount if fee_records else 0
-    paid_count = sum(1 for r in fee_records if r.status == "paid")
+    fee_enabled = len(active_fee_records) > 0
+    fee_amount = (
+        active_fee_records[0].required_amount
+        if active_fee_records
+        else fee_records[0].required_amount if fee_records else 0
+    )
+    paid_count = sum(1 for r in active_fee_records if r.status == "paid")
 
     has_participants = len(participants) > 0
     has_report = bool(report.final_content or report.generated_content)
     has_fee = fee_enabled
-    fee_paid = paid_count == len(fee_records) and len(fee_records) > 0
+    fee_paid = paid_count == len(active_fee_records) and len(active_fee_records) > 0
     has_receipts = len(receipts) > 0
     receipts_ok = all(r.evidence_status == "valid" for r in receipts) if receipts else True
 
@@ -255,7 +322,7 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
         {"key": "hwpx_generated", "label": "HWPX 문서 생성", "done": hwpx_count > 0, "count": hwpx_count},
         {"key": "activity_fee_setup", "label": "활동비 설정", "done": has_fee},
         {"key": "activity_fee_paid", "label": "활동비 납부 완료", "done": fee_paid,
-         "detail": f"{paid_count}/{len(fee_records)}" if fee_records else None},
+         "detail": f"{paid_count}/{len(active_fee_records)}" if active_fee_records else None},
         {"key": "receipts", "label": "영수증 연결", "done": has_receipts, "count": len(receipts)},
         {"key": "receipts_ok", "label": "증빙 확인", "done": receipts_ok},
         {"key": "files", "label": "파일 등록", "done": file_count > 0, "count": file_count},
@@ -314,7 +381,8 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
             "amount": fee_amount,
             "period_key": period_key,
             "paid_count": paid_count,
-            "total_count": len(fee_records),
+            "total_count": len(active_fee_records),
+            "excluded_count": len(fee_records) - len(active_fee_records),
             "records": fee_list,
         },
         "checklist": checklist,
@@ -421,17 +489,22 @@ def add_participant(
         )
     )
     if existing:
-        raise HTTPException(status_code=400, detail="Already a participant")
+        if _is_active_participant(existing):
+            raise HTTPException(status_code=400, detail="Already a participant")
+        existing.status = "active"
+        existing.role = payload.role
+        participant = existing
+    else:
+        participant = ActivityParticipant(
+            activity_report_id=activity_id,
+            member_id=payload.member_id,
+            role=payload.role,
+            status="active",
+        )
+        db.add(participant)
 
-    participant = ActivityParticipant(
-        activity_report_id=activity_id,
-        member_id=payload.member_id,
-        role=payload.role,
-    )
-    db.add(participant)
-
-    # Restore cancelled activity_fee record if one exists (re-added participant)
-    period_key = f"act-{str(activity_id)[:8]}"
+    # Restore cancelled/excluded activity_fee record if one exists (re-added participant)
+    period_key = _activity_period_key(activity_id)
     cancelled_fee = db.execute(
         select(PaymentRecord).where(
             and_(
@@ -439,19 +512,17 @@ def add_participant(
                 PaymentRecord.period == period_key,
                 PaymentRecord.payment_type == "activity_fee",
                 PaymentRecord.activity_report_id == activity_id,
-                PaymentRecord.status == "cancelled",
+                PaymentRecord.status.in_(INACTIVE_ACTIVITY_FEE_STATUSES),
             )
         )
     ).scalar_one_or_none()
     if cancelled_fee:
+        current_fee = _load_activity_fee_records(db, activity_id)
+        if current_fee:
+            cancelled_fee.required_amount = current_fee[0].required_amount
         paid = cancelled_fee.paid_amount or 0
         required = cancelled_fee.required_amount or 0
-        if paid >= required and paid > 0:
-            cancelled_fee.status = "paid" if paid == required else "overpaid"
-        elif paid > 0:
-            cancelled_fee.status = "partial"
-        else:
-            cancelled_fee.status = "unpaid"
+        cancelled_fee.status = _compute_payment_status(paid, required)
         cancelled_fee.refund_status = None
 
     commit_or_400(db, "Could not add participant")
@@ -486,10 +557,10 @@ def remove_participant(
     )
     if not participant:
         raise HTTPException(status_code=404, detail="Participant not found")
-    db.delete(participant)
+    participant.status = "removed"
 
     # Sync activity_fee PaymentRecord: cancel and flag for refund if paid
-    period_key = f"act-{str(activity_id)[:8]}"
+    period_key = _activity_period_key(activity_id)
     fee_record = db.execute(
         select(PaymentRecord).where(
             and_(
@@ -687,16 +758,15 @@ def generate_activity_fees(
 ) -> dict:
     report = _get_active_activity_or_404(db, activity_id)
 
-    participants = list(db.scalars(
-        select(ActivityParticipant).where(ActivityParticipant.activity_report_id == activity_id)
-    ))
+    participants = list(db.scalars(select(ActivityParticipant).where(_active_participant_filter(activity_id))))
     if not participants:
         raise HTTPException(status_code=400, detail="참여자가 없습니다. 먼저 참여자를 추가하세요.")
 
-    period_key = payload.period or f"act-{str(activity_id)[:8]}"
+    period_key = payload.period or _activity_period_key(activity_id)
 
     created = 0
     updated = 0
+    active_member_ids = {p.member_id for p in participants if p.member_id}
     for p in participants:
         if not p.member_id:
             continue  # skip external participants — no payment record
@@ -713,23 +783,11 @@ def generate_activity_fees(
         if existing:
             # Always update required_amount so amount change is reflected everywhere
             existing.required_amount = payload.fee_amount
-            if existing.status == "cancelled":
-                # Participant was re-added; restore status from paid amounts
-                paid = existing.paid_amount or 0
-                if paid >= payload.fee_amount:
-                    existing.status = "paid" if paid == payload.fee_amount else "overpaid"
-                elif paid > 0:
-                    existing.status = "partial"
-                else:
-                    existing.status = "unpaid"
+            existing.activity_report_id = activity_id
+            if existing.status in INACTIVE_ACTIVITY_FEE_STATUSES:
                 existing.refund_status = None
-            elif existing.status not in ("exempt", "need_check"):
-                if existing.paid_amount >= payload.fee_amount:
-                    existing.status = "paid" if existing.paid_amount == payload.fee_amount else "overpaid"
-                elif existing.paid_amount > 0:
-                    existing.status = "partial"
-                else:
-                    existing.status = "unpaid"
+            if existing.status not in ("exempt", "need_check"):
+                existing.status = _compute_payment_status(existing.paid_amount, payload.fee_amount)
             updated += 1
         else:
             record = PaymentRecord(
@@ -744,6 +802,24 @@ def generate_activity_fees(
             db.add(record)
             created += 1
 
+    cancelled = 0
+    stale_records = list(db.scalars(
+        select(PaymentRecord).where(
+            and_(
+                PaymentRecord.period == period_key,
+                PaymentRecord.payment_type == "activity_fee",
+                PaymentRecord.activity_report_id == activity_id,
+            )
+        )
+    ))
+    for record in stale_records:
+        if record.member_id in active_member_ids or record.status in INACTIVE_ACTIVITY_FEE_STATUSES:
+            continue
+        record.status = "cancelled"
+        if (record.paid_amount or 0) > 0:
+            record.refund_status = "refund_required"
+        cancelled += 1
+
     db.commit()
     return {
         "ok": True,
@@ -751,6 +827,7 @@ def generate_activity_fees(
         "fee_amount": payload.fee_amount,
         "created": created,
         "updated": updated,
+        "cancelled": cancelled,
         "skipped": 0,  # kept for backward compat
         "total": len(participants),
     }
@@ -1325,15 +1402,8 @@ def get_activity_fee_summary(
 ) -> dict:
     """Aggregated summary of activity_fee records for this activity only."""
     _get_active_activity_or_404(db, activity_id)
-    period_key = f"act-{str(activity_id)[:8]}"
-    fee_records = list(db.scalars(
-        select(PaymentRecord).where(
-            and_(
-                PaymentRecord.period == period_key,
-                PaymentRecord.payment_type == "activity_fee",
-            )
-        )
-    ))
+    period_key = _activity_period_key(activity_id)
+    fee_records = _load_activity_fee_records(db, activity_id)
     paid = sum(1 for r in fee_records if r.status == "paid")
     unpaid = sum(1 for r in fee_records if r.status == "unpaid")
     partial = sum(1 for r in fee_records if r.status == "partial")
@@ -1605,3 +1675,168 @@ def get_audit_checklist(
         ],
     }
 
+
+# ─── Evidence Upload (Task 43 Hotfix) ─────────────────────────────────────────
+
+@router.get("/{activity_id}/evidence")
+def get_activity_evidence(
+    activity_id: UUID,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Return all evidence (receipts) linked to this activity, all document_types."""
+    _get_active_activity_or_404(db, activity_id)
+    receipts = list(db.scalars(
+        select(Receipt).where(Receipt.activity_report_id == activity_id)
+    ))
+    result = []
+    for r in receipts:
+        # Prefer manual_data over parsed_data for display
+        display_data = dict(r.manual_data or r.parsed_data or {})
+        result.append({
+            "id": str(r.id),
+            "activity_report_id": str(r.activity_report_id) if r.activity_report_id else None,
+            "file_id": str(r.file_id) if r.file_id else None,
+            "transaction_id": str(r.transaction_id) if r.transaction_id else None,
+            "document_type": r.document_type or "unknown",
+            "title": r.title or r.store_name,
+            "receipt_date": str(r.receipt_date) if r.receipt_date else None,
+            "store_name": r.store_name,
+            "amount": r.amount,
+            "payment_method": r.payment_method,
+            "category": r.category,
+            "evidence_status": r.evidence_status,
+            "need_check": r.need_check,
+            "reason": r.reason,
+            "parsed_data": r.parsed_data,
+            "manual_data": r.manual_data,
+            "display_data": display_data,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        })
+    return result
+
+
+@router.post("/{activity_id}/evidence/upload")
+def upload_activity_evidence(
+    activity_id: UUID,
+    file: UploadFile = File(...),
+    document_type: str = Form(default="unknown"),
+    save_to_db: bool = Form(default=True),
+    manual_payment_method: str | None = Form(default=None),
+    manual_category: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Upload and analyze an evidence file for a specific activity.
+
+    Directly creates UploadedFile + Receipt (or updates) and links both to the activity.
+    Bypasses the AI assistant route to ensure reliable saving.
+    """
+    from pathlib import Path
+    from uuid import uuid4
+    from app.core.config import settings
+    from app.routers.common import commit_or_400
+
+    _get_active_activity_or_404(db, activity_id)
+
+    # 1. Save the uploaded file
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file.filename or "").suffix.lower()
+    stored_name = f"{uuid4()}{suffix}"
+    stored_path = settings.UPLOAD_DIR / stored_name
+
+    try:
+        with stored_path.open("wb") as out:
+            while chunk := file.file.read(1024 * 1024):
+                out.write(chunk)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"파일 저장 실패: {exc}")
+
+    uploaded = UploadedFile(
+        original_filename=file.filename or stored_name,
+        stored_path=(Path("uploads") / stored_name).as_posix(),
+        mime_type=file.content_type,
+        file_type="evidence",
+        file_category="evidence",
+        file_role="evidence",
+        activity_report_id=activity_id,
+        related_entity_type="activity_report",
+        related_entity_id=activity_id,
+    )
+    db.add(uploaded)
+    commit_or_400(db, "Could not save file metadata")
+    db.refresh(uploaded)
+
+    # 2. Run OCR/AI analysis
+    receipt_id = None
+    saved = False
+    extracted_dict: dict = {}
+    evidence_status = "pending"
+    need_check = False
+    reason = ""
+    model_str = "unknown"
+
+    full_path = settings.UPLOAD_DIR.parent / uploaded.stored_path
+
+    if save_to_db:
+        try:
+            from app.agents.receipt_analysis_orchestrator import (
+                ReceiptAnalysisOrchestrator,
+                ReceiptOrchestratorInput,
+            )
+            orch_input = ReceiptOrchestratorInput(
+                file_id=uploaded.id,
+                file_path=full_path if full_path.exists() else None,
+                file_name=uploaded.original_filename,
+                mime_type=uploaded.mime_type,
+                activity_report_id=activity_id,
+                save_to_db=True,
+                manual_payment_method=manual_payment_method,
+                manual_category=manual_category,
+                document_type=document_type,
+            )
+            result = ReceiptAnalysisOrchestrator(db).run(orch_input)
+            receipt_id = result.receipt_id
+            saved = result.saved
+            evidence_status = result.policy.evidence_status
+            need_check = result.policy.need_check
+            reason = result.policy.reason
+            model_str = result.model
+            extracted_dict = {
+                "store_name": result.extracted.store_name,
+                "amount": result.extracted.amount,
+                "payment_method": result.extracted.payment_method,
+                "category": result.extracted.category,
+                "receipt_date": result.extracted.receipt_date,
+                "raw_text": result.extracted.raw_text,
+                "confidence": result.extracted.confidence,
+            }
+        except Exception as exc:
+            # Analysis failed but file is already saved → create a basic receipt record
+            receipt = Receipt(
+                file_id=uploaded.id,
+                activity_report_id=activity_id,
+                document_type=document_type,
+                evidence_status="pending",
+                need_check=True,
+                reason=f"분석 실패: {exc}",
+                amount=0,
+            )
+            db.add(receipt)
+            commit_or_400(db, "Could not create receipt record")
+            db.refresh(receipt)
+            receipt_id = receipt.id
+            saved = True
+
+    return {
+        "ok": True,
+        "file_id": str(uploaded.id),
+        "receipt_id": str(receipt_id) if receipt_id else None,
+        "activity_report_id": str(activity_id),
+        "document_type": document_type,
+        "saved": saved,
+        "evidence_status": evidence_status,
+        "need_check": need_check,
+        "reason": reason,
+        "model": model_str,
+        "extracted": extracted_dict,
+    }

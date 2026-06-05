@@ -23,6 +23,16 @@ from app.services.membership_fee_management_service import get_membership_fee_su
 
 router = APIRouter()
 
+INACTIVE_PARTICIPANT_STATUSES = {"removed", "cancelled", "excluded", "deleted", "inactive"}
+INACTIVE_ACTIVITY_FEE_STATUSES = {"cancelled", "excluded"}
+
+
+def active_participant_condition() -> object:
+    return or_(
+        ActivityParticipant.status.is_(None),
+        ActivityParticipant.status.notin_(INACTIVE_PARTICIPANT_STATUSES),
+    )
+
 
 def count_where(db: Session, model: type, *conditions: object) -> int:
     statement = select(func.count(model.id))
@@ -38,15 +48,21 @@ def dashboard_summary(db: Session = Depends(get_db)) -> dict:
 
     # Unpaid activity fees: only from non-deleted activities, exclude cancelled records
     unpaid_activity_fee = db.scalar(
-        select(func.count(PaymentRecord.id)).where(
+        select(func.count(PaymentRecord.id))
+        .join(
+            ActivityParticipant,
+            and_(
+                ActivityParticipant.activity_report_id == PaymentRecord.activity_report_id,
+                ActivityParticipant.member_id == PaymentRecord.member_id,
+            ),
+        )
+        .where(
             and_(
                 PaymentRecord.payment_type == "activity_fee",
                 PaymentRecord.status == "unpaid",
-                PaymentRecord.status != "cancelled",
-                or_(
-                    PaymentRecord.activity_report_id.is_(None),
-                    PaymentRecord.activity_report_id.in_(active_activity_ids_subq),
-                ),
+                PaymentRecord.status.notin_(INACTIVE_ACTIVITY_FEE_STATUSES),
+                PaymentRecord.activity_report_id.in_(active_activity_ids_subq),
+                active_participant_condition(),
             )
         )
     ) or 0
@@ -148,7 +164,12 @@ def dashboard_calendar(
 
         part_rows = db.execute(
             select(ActivityParticipant.activity_report_id, func.count(ActivityParticipant.id))
-            .where(ActivityParticipant.activity_report_id.in_(act_ids))
+            .where(
+                and_(
+                    ActivityParticipant.activity_report_id.in_(act_ids),
+                    active_participant_condition(),
+                )
+            )
             .group_by(ActivityParticipant.activity_report_id)
         ).all()
         participant_counts = {str(r[0]): r[1] for r in part_rows}
@@ -156,11 +177,19 @@ def dashboard_calendar(
         # Fee status: check if any non-cancelled unpaid records exist
         fee_rows = db.execute(
             select(PaymentRecord.activity_report_id, PaymentRecord.status)
+            .join(
+                ActivityParticipant,
+                and_(
+                    ActivityParticipant.activity_report_id == PaymentRecord.activity_report_id,
+                    ActivityParticipant.member_id == PaymentRecord.member_id,
+                ),
+            )
             .where(
                 and_(
                     PaymentRecord.activity_report_id.in_(act_ids),
                     PaymentRecord.payment_type == "activity_fee",
-                    PaymentRecord.status != "cancelled",
+                    PaymentRecord.status.notin_(INACTIVE_ACTIVITY_FEE_STATUSES),
+                    active_participant_condition(),
                 )
             )
         ).all()
@@ -223,15 +252,21 @@ def dashboard_todo(db: Session = Depends(get_db)) -> dict:
     )
 
     unpaid_activity_fee = db.scalar(
-        select(func.count(PaymentRecord.id)).where(
+        select(func.count(PaymentRecord.id))
+        .join(
+            ActivityParticipant,
+            and_(
+                ActivityParticipant.activity_report_id == PaymentRecord.activity_report_id,
+                ActivityParticipant.member_id == PaymentRecord.member_id,
+            ),
+        )
+        .where(
             and_(
                 PaymentRecord.payment_type == "activity_fee",
                 PaymentRecord.status == "unpaid",
-                PaymentRecord.status != "cancelled",
-                or_(
-                    PaymentRecord.activity_report_id.is_(None),
-                    PaymentRecord.activity_report_id.in_(active_activity_ids_subq),
-                ),
+                PaymentRecord.status.notin_(INACTIVE_ACTIVITY_FEE_STATUSES),
+                PaymentRecord.activity_report_id.in_(active_activity_ids_subq),
+                active_participant_condition(),
             )
         )
     ) or 0

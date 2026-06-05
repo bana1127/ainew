@@ -3,10 +3,23 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.assistant_action import AssistantActionProposal
+
+INACTIVE_PARTICIPANT_STATUSES = {"removed", "cancelled", "excluded", "deleted", "inactive"}
+INACTIVE_ACTIVITY_FEE_STATUSES = {"cancelled", "excluded"}
+
+
+def _active_participant_condition(ActivityParticipant, activity_id: UUID):
+    return and_(
+        ActivityParticipant.activity_report_id == activity_id,
+        or_(
+            ActivityParticipant.status.is_(None),
+            ActivityParticipant.status.notin_(INACTIVE_PARTICIPANT_STATUSES),
+        ),
+    )
 
 
 def create_action_proposal(
@@ -99,7 +112,7 @@ def preview_activity_fee_generate_action(
 
     participants = list(
         db.scalars(
-            select(ActivityParticipant).where(ActivityParticipant.activity_report_id == activity_id)
+            select(ActivityParticipant).where(_active_participant_condition(ActivityParticipant, activity_id))
         )
     )
     period_key = f"act-{str(activity_id)[:8]}"
@@ -113,7 +126,7 @@ def preview_activity_fee_generate_action(
             )
         )
     )
-    participant_member_ids = {p.member_id for p in participants}
+    participant_member_ids = {p.member_id for p in participants if p.member_id}
     existing_for_activity = [r for r in existing if r.member_id in participant_member_ids]
     existing_member_ids = {r.member_id for r in existing_for_activity}
     changed_amount_count = sum(1 for r in existing_for_activity if r.required_amount != fee_amount)
@@ -140,14 +153,17 @@ def apply_activity_fee_generate_action(db: Session, payload: dict) -> dict:
     fee_amount = int(payload["fee_amount"])
     participants = list(
         db.scalars(
-            select(ActivityParticipant).where(ActivityParticipant.activity_report_id == activity_id)
+            select(ActivityParticipant).where(_active_participant_condition(ActivityParticipant, activity_id))
         )
     )
     period_key = f"act-{str(activity_id)[:8]}"
     created = 0
     updated = 0
+    active_member_ids = {p.member_id for p in participants if p.member_id}
 
     for participant in participants:
+        if not participant.member_id:
+            continue
         record = db.scalar(
             select(PaymentRecord).where(
                 and_(
@@ -159,10 +175,11 @@ def apply_activity_fee_generate_action(db: Session, payload: dict) -> dict:
         )
         if record:
             record.required_amount = fee_amount
-            if record.status not in ("exempt", "cancelled", "need_check"):
+            record.activity_report_id = activity_id
+            if record.status in INACTIVE_ACTIVITY_FEE_STATUSES:
+                record.refund_status = None
+            if record.status not in ("exempt", "need_check"):
                 record.status = _payment_status(record.paid_amount, fee_amount)
-            if record.activity_report_id is None:
-                record.activity_report_id = activity_id
             updated += 1
             continue
 
@@ -179,6 +196,24 @@ def apply_activity_fee_generate_action(db: Session, payload: dict) -> dict:
         )
         created += 1
 
+    cancelled = 0
+    stale_records = list(db.scalars(
+        select(PaymentRecord).where(
+            and_(
+                PaymentRecord.period == period_key,
+                PaymentRecord.payment_type == "activity_fee",
+                PaymentRecord.activity_report_id == activity_id,
+            )
+        )
+    ))
+    for record in stale_records:
+        if record.member_id in active_member_ids or record.status in INACTIVE_ACTIVITY_FEE_STATUSES:
+            continue
+        record.status = "cancelled"
+        if (record.paid_amount or 0) > 0:
+            record.refund_status = "refund_required"
+        cancelled += 1
+
     db.flush()
     return {
         "activity_id": str(activity_id),
@@ -186,6 +221,7 @@ def apply_activity_fee_generate_action(db: Session, payload: dict) -> dict:
         "period_key": period_key,
         "created_count": created,
         "updated_count": updated,
+        "cancelled_count": cancelled,
         "total_participants": len(participants),
     }
 
@@ -518,6 +554,10 @@ def _get_pending_action(db: Session, action_id: UUID) -> AssistantActionProposal
 
 
 def _payment_status(paid: int, required: int) -> str:
+    paid = max(0, int(paid or 0))
+    required = max(0, int(required or 0))
+    if required == 0:
+        return "exempt"
     if paid == 0:
         return "unpaid"
     if paid < required:

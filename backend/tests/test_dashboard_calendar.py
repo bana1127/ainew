@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import calendar
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -52,17 +53,16 @@ class TestCalendarEventStructure:
     def _make_activity(self, title="테스트 활동", activity_date=date(2026, 6, 15),
                        status="planned", final_content=None, generated_content=None,
                        deleted_at=None):
-        from app.models.activity import ActivityReport
-        act = MagicMock(spec=ActivityReport)
-        act.id = __import__("uuid").uuid4()
-        act.title = title
-        act.activity_date = activity_date
-        act.location = "동아리방"
-        act.status = status
-        act.final_content = final_content
-        act.generated_content = generated_content
-        act.deleted_at = deleted_at
-        return act
+        return SimpleNamespace(
+            id=__import__("uuid").uuid4(),
+            title=title,
+            activity_date=activity_date,
+            location="동아리방",
+            status=status,
+            final_content=final_content,
+            generated_content=generated_content,
+            deleted_at=deleted_at,
+        )
 
     def test_event_has_required_fields(self):
         act = self._make_activity(final_content="보고서")

@@ -26,21 +26,48 @@ export type DashboardSummary = {
 
 export type CalendarEvent = {
   id: string;
-  type: string;
+  type?: string;
+  event_type: "activity" | "general" | "deadline" | "meeting" | string;
   title: string;
   date: string;
-  location: string;
+  start_time?: string | null;
+  end_time?: string | null;
+  location: string | null;
+  description?: string | null;
   status: string;
-  needs_report: boolean;
-  needs_evidence: boolean;
+  needs_report?: boolean;
+  needs_evidence?: boolean;
   participant_count?: number;
   fee_status?: string;
-  url: string;
+  activity_report_id?: string | null;
+  target_url?: string | null;
+  url?: string | null;
+  is_all_day?: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type DashboardCalendar = {
   month: string;
   events: CalendarEvent[];
+};
+
+export type CalendarEventsResponse = {
+  year: number;
+  month: number;
+  items: CalendarEvent[];
+};
+
+export type CalendarEventPayload = {
+  title: string;
+  event_type?: "general" | "deadline" | "meeting" | string;
+  event_date: string;
+  start_time?: string | null;
+  end_time?: string | null;
+  location?: string | null;
+  description?: string | null;
+  status?: string;
+  is_all_day?: boolean;
 };
 
 export type DashboardTodo = {
@@ -54,6 +81,30 @@ export type DashboardTodo = {
 export async function getDashboardCalendar(month?: string): Promise<DashboardCalendar> {
   const qs = month ? `?month=${month}` : "";
   return apiFetch<DashboardCalendar>(`/api/dashboard/calendar${qs}`);
+}
+
+export async function getCalendarEvents(year: number, month: number): Promise<CalendarEventsResponse> {
+  return apiFetch<CalendarEventsResponse>(`/api/calendar/events?year=${year}&month=${month}`);
+}
+
+export async function createCalendarEvent(payload: CalendarEventPayload): Promise<CalendarEvent> {
+  return apiFetch<CalendarEvent>("/api/calendar/events", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateCalendarEvent(id: string, payload: Partial<CalendarEventPayload>): Promise<CalendarEvent> {
+  return apiFetch<CalendarEvent>(`/api/calendar/events/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteCalendarEvent(id: string): Promise<{ ok: boolean; deleted_id: string }> {
+  return apiFetch<{ ok: boolean; deleted_id: string }>(`/api/calendar/events/${id}`, {
+    method: "DELETE",
+  });
 }
 
 export async function getDashboardTodo(): Promise<DashboardTodo> {
@@ -482,6 +533,12 @@ export type BankTransaction = {
   linked_activity_id?: string | null;
   review_status?: string | null;
   review_note?: string | null;
+  // Task 43: Budget exclusion fields
+  exclude_from_budget?: boolean;
+  exclude_from_income?: boolean;
+  exclude_from_expense?: boolean;
+  exclude_reason?: string | null;
+  excluded_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -526,11 +583,13 @@ export type TransactionQueryParams = {
   payment_type?: string;
   start_date?: string;
   end_date?: string;
+  operating_quarter?: string;
   min_deposit?: number;
   max_deposit?: number;
   min_withdraw?: number;
   max_withdraw?: number;
   q?: string;
+  exclude_from_budget?: boolean;
 };
 
 export async function parseTransactionPreview(
@@ -564,6 +623,7 @@ export async function getTransactionsTyped(
     if (params.payment_type) p.payment_type = params.payment_type;
     if (params.start_date) p.start_date = params.start_date;
     if (params.end_date) p.end_date = params.end_date;
+    if (params.operating_quarter) p.operating_quarter = params.operating_quarter;
     if (params.q) p.q = params.q;
     if (params.min_deposit !== undefined) p.min_deposit = String(params.min_deposit);
     if (params.max_deposit !== undefined) p.max_deposit = String(params.max_deposit);
@@ -571,8 +631,76 @@ export async function getTransactionsTyped(
     if (params.max_withdraw !== undefined) p.max_withdraw = String(params.max_withdraw);
     if (params.skip !== undefined) p.skip = String(params.skip);
     if (params.limit !== undefined) p.limit = String(params.limit);
+    if (params.exclude_from_budget !== undefined) p.exclude_from_budget = String(params.exclude_from_budget);
   }
   return apiFetch<BankTransaction[]>(`/api/transactions${buildQuery(p)}`);
+}
+
+// ── Task 43: Budget exclusion API ────────────────────────────────────────────
+
+export async function budgetExcludeTransaction(
+  transactionId: string,
+  payload: {
+    exclude_from_budget?: boolean;
+    exclude_from_income?: boolean;
+    exclude_from_expense?: boolean;
+    reason?: string;
+  },
+): Promise<{ ok: boolean; exclude_from_budget: boolean; exclude_from_income: boolean; exclude_from_expense: boolean }> {
+  return apiFetch(`/api/transactions/${transactionId}/budget-exclude`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function budgetIncludeTransaction(transactionId: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/transactions/${transactionId}/budget-include`, {
+    method: "POST",
+  });
+}
+
+export async function manualMatchTransaction(
+  transactionId: string,
+  paymentRecordId: string,
+  paymentType: "membership_fee" | "activity_fee",
+): Promise<{ ok: boolean; match_status: string; paid_amount: number; status: string }> {
+  return apiFetch(`/api/transactions/${transactionId}/manual-match`, {
+    method: "POST",
+    body: JSON.stringify({ payment_record_id: paymentRecordId, payment_type: paymentType }),
+  });
+}
+
+export async function getQuarterBudgetSummary(operatingQuarter: string): Promise<BudgetSummary & {
+  operating_quarter: string;
+  membership_fee_income: number;
+  activity_fee_income: number;
+  other_income: number;
+  excluded_income_count: number;
+  excluded_expense_count: number;
+  excluded_income_amount: number;
+  excluded_expense_amount: number;
+}> {
+  return apiFetch(`/api/budget/quarter-summary?operating_quarter=${encodeURIComponent(operatingQuarter)}`);
+}
+
+export async function downloadQuarterCsv(operatingQuarter: string): Promise<void> {
+  const url = `/api/budget/quarter-export/csv?operating_quarter=${encodeURIComponent(operatingQuarter)}`;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${operatingQuarter}_budget.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+export async function downloadQuarterZip(operatingQuarter: string): Promise<void> {
+  const url = `/api/budget/quarter-export/zip?operating_quarter=${encodeURIComponent(operatingQuarter)}`;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${operatingQuarter}_evidence.zip`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // ─── Budget management (Task 38) ─────────────────────────────────────────────
@@ -1306,12 +1434,14 @@ export type ReceiptAnalyzeResponse = {
   policy: ReceiptPolicyCheckResult;
   saved: boolean;
   model: string;
+  document_type: string;
 };
 
 export type Receipt = {
   id: string;
   activity_report_id: string | null;
   file_id: string | null;
+  transaction_id: string | null;
   receipt_date: string | null;
   store_name: string | null;
   amount: number;
@@ -1320,6 +1450,10 @@ export type Receipt = {
   evidence_status: string;
   need_check: boolean;
   reason: string | null;
+  document_type: string;
+  title: string | null;
+  parsed_data: Record<string, unknown> | null;
+  manual_data: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
@@ -1357,6 +1491,69 @@ export async function analyzeReceipt(
   });
 }
 
+// Task 43 Hotfix: Direct activity evidence upload (bypasses AI assistant route)
+export type ActivityEvidenceUploadResult = {
+  ok: boolean;
+  file_id: string;
+  receipt_id: string | null;
+  activity_report_id: string;
+  document_type: string;
+  saved: boolean;
+  evidence_status: string;
+  need_check: boolean;
+  reason: string;
+  model: string;
+  extracted: Record<string, unknown>;
+};
+
+export async function uploadActivityEvidence(
+  activityId: string,
+  file: File,
+  options?: {
+    document_type?: string;
+    save_to_db?: boolean;
+    manual_payment_method?: string;
+    manual_category?: string;
+  },
+): Promise<ActivityEvidenceUploadResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (options?.document_type) formData.append("document_type", options.document_type);
+  formData.append("save_to_db", options?.save_to_db !== false ? "true" : "false");
+  if (options?.manual_payment_method) formData.append("manual_payment_method", options.manual_payment_method);
+  if (options?.manual_category) formData.append("manual_category", options.manual_category);
+  return apiFetch<ActivityEvidenceUploadResult>(`/api/activities/${activityId}/evidence/upload`, {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export type ActivityEvidence = {
+  id: string;
+  activity_report_id: string | null;
+  file_id: string | null;
+  transaction_id: string | null;
+  document_type: string;
+  title: string | null;
+  receipt_date: string | null;
+  store_name: string | null;
+  amount: number;
+  payment_method: string | null;
+  category: string | null;
+  evidence_status: string;
+  need_check: boolean;
+  reason: string | null;
+  parsed_data: Record<string, unknown> | null;
+  manual_data: Record<string, unknown> | null;
+  display_data: Record<string, unknown>;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export async function getActivityEvidence(activityId: string): Promise<ActivityEvidence[]> {
+  return apiFetch<ActivityEvidence[]>(`/api/activities/${activityId}/evidence`);
+}
+
 export async function getReceiptsTyped(
   params?: ReceiptQueryParams,
 ): Promise<Receipt[]> {
@@ -1388,6 +1585,35 @@ export async function updateReceiptTyped(
 
 export async function deleteReceipt(id: string): Promise<Receipt> {
   return apiFetch<Receipt>(`/api/receipts/${id}`, { method: "DELETE" });
+}
+
+// Task 43: Document type labels and manual edit
+export const DOCUMENT_TYPE_LABELS: Record<string, string> = {
+  receipt: "영수증",
+  business_registration: "사업자등록증",
+  bankbook_copy: "통장 사본",
+  transfer_confirmation: "계좌이체 확인서",
+  invoice: "청구서",
+  quote: "견적서",
+  transaction_statement: "거래명세서",
+  other: "기타 증빙",
+  unknown: "미분류",
+};
+
+export async function updateReceiptManualData(
+  receiptId: string,
+  payload: {
+    manual_data: Record<string, unknown>;
+    document_type?: string;
+    title?: string;
+    amount?: number;
+    receipt_date?: string;
+  },
+): Promise<Receipt> {
+  return apiFetch<Receipt>(`/api/receipts/${receiptId}/manual-edit`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1482,6 +1708,7 @@ export type AssistantActionApplyResult = {
 export type AssistantChatContext = {
   page?: string | null;
   activity_id?: string | null;
+  last_activity_id?: string | null;
   period?: string | null;
 };
 
@@ -1495,17 +1722,27 @@ export type AssistantChatResponse = {
   intent:
     | "member_count"
     | "activity_count"
+    | "activity_overview"
+    | "activity_detail_insight"
     | "activity_participant_count"
     | "membership_fee_status"
+    | "membership_fee_insight"
     | "activity_fee_status"
+    | "activity_fee_insight"
+    | "calendar_schedule"
     | "budget_summary"
+    | "budget_insight"
     | "cashflow_summary"
     | "activity_settlement_status"
+    | "transaction_review"
     | "evidence_missing"
+    | "evidence_summary"
     | "report_missing"
+    | "report_summary"
     | "audit_readiness"
     | "document_summary"
     | "receipt_summary"
+    | "ambiguous_activity"
     | "unknown";
   data_sources: string[];
   links: AssistantChatLink[];

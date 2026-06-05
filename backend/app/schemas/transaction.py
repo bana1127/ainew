@@ -21,6 +21,12 @@ class BankTransactionBase(ORMModel):
     linked_activity_id: UUID | None = None
     review_status: str = "open"
     review_note: str | None = None
+    # Task 43: Budget exclusion fields
+    exclude_from_budget: bool = False
+    exclude_from_income: bool = False
+    exclude_from_expense: bool = False
+    exclude_reason: str | None = None
+    excluded_at: datetime | None = None
 
 
 class BankTransactionCreate(BankTransactionBase):
@@ -43,6 +49,10 @@ class BankTransactionUpdate(ORMModel):
     linked_activity_id: UUID | None = None
     review_status: str | None = None
     review_note: str | None = None
+    exclude_from_budget: bool | None = None
+    exclude_from_income: bool | None = None
+    exclude_from_expense: bool | None = None
+    exclude_reason: str | None = None
 
 
 class BankTransactionRead(BankTransactionBase):

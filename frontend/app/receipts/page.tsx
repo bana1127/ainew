@@ -15,7 +15,11 @@ import {
   getActivityReportsFiltered,
   getReceiptsTyped,
   linkReceiptToActivity,
+  updateReceiptManualData,
+  DOCUMENT_TYPE_LABELS,
 } from "@/lib/api";
+import { EvidenceDocumentTypeBadge } from "@/components/evidence/EvidenceDocumentTypeBadge";
+import { EvidenceDetailEditModal } from "@/components/evidence/EvidenceDetailEditModal";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/Button";
@@ -41,11 +45,28 @@ const PAYMENT_METHOD_OPTIONS = [
 ];
 
 const EVIDENCE_STATUS_OPTIONS = [
-  { value: "", label: "전체" },
+  { value: "", label: "전체 상태" },
   { value: "valid", label: "적합" },
   { value: "need_check", label: "확인 필요" },
   { value: "invalid", label: "부적합" },
   { value: "pending", label: "대기" },
+];
+
+const DOCUMENT_TYPE_FILTER_OPTIONS = [
+  { value: "", label: "전체 유형" },
+  ...Object.entries(DOCUMENT_TYPE_LABELS).map(([v, l]) => ({ value: v, label: l })),
+];
+
+const DOCUMENT_TYPE_UPLOAD_OPTIONS = [
+  { value: "unknown", label: "자동 감지" },
+  { value: "receipt", label: "영수증" },
+  { value: "business_registration", label: "사업자등록증" },
+  { value: "bankbook_copy", label: "통장 사본" },
+  { value: "transfer_confirmation", label: "계좌이체 확인서" },
+  { value: "invoice", label: "청구서" },
+  { value: "quote", label: "견적서" },
+  { value: "transaction_statement", label: "거래명세서" },
+  { value: "other", label: "기타 증빙" },
 ];
 
 const PAYMENT_METHOD_ALL_OPTIONS = [
@@ -73,7 +94,10 @@ export default function ReceiptsPage() {
   const [activityReportId, setActivityReportId] = useState("");
   const [manualPaymentMethod, setManualPaymentMethod] = useState("unknown");
   const [manualCategory, setManualCategory] = useState("");
+  const [manualDocumentType, setManualDocumentType] = useState("unknown");
   const [saveToDb, setSaveToDb] = useState(true);
+  const [editTarget, setEditTarget] = useState<Receipt | null>(null);
+  const [docTypeFilter, setDocTypeFilter] = useState("");
 
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<ReceiptAnalyzeResponse | null>(null);
@@ -142,6 +166,7 @@ export default function ReceiptsPage() {
       if (manualPaymentMethod && manualPaymentMethod !== "unknown")
         formData.append("manual_payment_method", manualPaymentMethod);
       if (manualCategory) formData.append("manual_category", manualCategory);
+      formData.append("document_type", manualDocumentType);
       formData.append("save_to_db", saveToDb ? "true" : "false");
       const result = await analyzeReceipt(formData);
       setAnalysisResult(result);
@@ -152,6 +177,22 @@ export default function ReceiptsPage() {
       setAnalyzing(false);
     }
   }
+
+  async function handleSaveEdit(receiptId: string, manualData: Record<string, unknown>, docType: string) {
+    await updateReceiptManualData(receiptId, {
+      manual_data: manualData,
+      document_type: docType,
+      title: String(manualData.title || manualData.business_name || manualData.account_holder || ""),
+      amount: manualData.amount ? Number(manualData.amount) : undefined,
+      receipt_date: String(manualData.receipt_date || manualData.transfer_date || ""),
+    });
+    setEditTarget(null);
+    await loadReceipts(filters);
+  }
+
+  const filteredReceipts = docTypeFilter
+    ? receipts.filter((r) => (r as unknown as Record<string, unknown>).document_type === docTypeFilter)
+    : receipts;
 
   function handleSearch() {
     const f = { ...filterDraft };
@@ -211,8 +252,8 @@ export default function ReceiptsPage() {
     <AppShell>
       <div className="space-y-6">
         <PageHeader
-          title="영수증 분석"
-          description="영수증을 업로드하고 AI로 증빙 적합성을 분석합니다."
+          title="증빙 분석"
+          description="증빙 파일을 업로드하고 AI로 내용을 분석합니다. 영수증, 사업자등록증, 통장 사본, 계좌이체 확인서 등을 지원합니다."
         />
 
         {/* Upload & Analyze */}
@@ -258,12 +299,26 @@ export default function ReceiptsPage() {
               value={activityReportId}
               onChange={(e) => setActivityReportId(e.target.value)}
             />
+            <div className="flex flex-col gap-1">
+              <label className="text-sm font-medium" style={{ color: "var(--text-main)" }}>문서 유형</label>
+              <select
+                value={manualDocumentType}
+                onChange={(e) => setManualDocumentType(e.target.value)}
+                style={inputStyle}
+              >
+                {DOCUMENT_TYPE_UPLOAD_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+            {manualDocumentType === "receipt" || manualDocumentType === "unknown" ? (
             <Select
               label="결제 방식 수동 선택"
               options={PAYMENT_METHOD_OPTIONS}
               value={manualPaymentMethod}
               onChange={(e) => setManualPaymentMethod(e.target.value)}
             />
+            ) : <div />}
             <div className="flex flex-col gap-1">
               <label className="text-sm font-medium" style={{ color: "var(--text-main)" }}>
                 지출 분류 (선택)
@@ -304,7 +359,7 @@ export default function ReceiptsPage() {
               disabled={!selectedFile || analyzing}
               loading={analyzing}
             >
-              {analyzing ? "분석 중..." : "영수증 분석"}
+              {analyzing ? "분석 중..." : "증빙 분석"}
             </Button>
           </div>
 
@@ -322,11 +377,21 @@ export default function ReceiptsPage() {
               <h2 className="text-base font-semibold" style={{ color: "var(--text-main)" }}>
                 분석 결과
               </h2>
+              <EvidenceDocumentTypeBadge documentType={analysisResult.document_type || "unknown"} />
               <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium"
                 style={{ background: "var(--primary-soft)", color: "var(--primary)" }}>
                 {analysisResult.model !== "mock" ? analysisResult.model : "AI 분석"}
               </span>
               <StatusBadge status={policy.evidence_status} />
+              {analysisResult.receipt_id && (
+                <Button size="sm" variant="secondary"
+                  onClick={() => {
+                    const r = receipts.find((x) => x.id === analysisResult.receipt_id);
+                    if (r) setEditTarget(r);
+                  }}>
+                  분석 결과 수정
+                </Button>
+              )}
             </div>
 
             <div className="grid sm:grid-cols-2 gap-6">
@@ -439,12 +504,12 @@ export default function ReceiptsPage() {
           </Card>
         )}
 
-        {/* Saved Receipts List */}
+        {/* Saved Evidence List */}
         <Card padding="none">
           <div className="flex items-center justify-between p-5"
             style={{ borderBottom: "1px solid var(--border-soft)" }}>
             <h2 className="text-base font-semibold" style={{ color: "var(--text-main)" }}>
-              저장된 영수증 목록
+              저장된 증빙 목록
             </h2>
             <Button variant="ghost" size="sm" onClick={() => loadReceipts(filters)}>
               새로고침
@@ -454,6 +519,19 @@ export default function ReceiptsPage() {
           {/* Filters */}
           <div className="flex flex-wrap items-end gap-3 p-5"
             style={{ borderBottom: "1px solid var(--border-soft)" }}>
+            <select
+              value={docTypeFilter}
+              onChange={(e) => setDocTypeFilter(e.target.value)}
+              style={{
+                background: "var(--surface)", color: "var(--text-main)",
+                border: "1px solid var(--border-soft)", borderRadius: 10,
+                padding: "8px 10px", fontSize: 13, maxWidth: 180,
+              }}
+            >
+              {DOCUMENT_TYPE_FILTER_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
             <Select
               options={EVIDENCE_STATUS_OPTIONS}
               value={filterDraft.evidence_status ?? ""}
@@ -471,7 +549,7 @@ export default function ReceiptsPage() {
               value={filterDraft.q ?? ""}
               onChange={(e) => setFilterDraft((f) => ({ ...f, q: e.target.value }))}
               onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-              placeholder="가맹점 / 분류 검색..."
+              placeholder="상호/계좌/메모 검색..."
               className="rounded-xl px-3 py-2 text-sm focus:outline-none w-44"
               style={{
                 background: "var(--surface)",
@@ -490,24 +568,31 @@ export default function ReceiptsPage() {
 
           {loadingList ? (
             <LoadingState />
-          ) : receipts.length === 0 ? (
+          ) : filteredReceipts.length === 0 ? (
             <EmptyState
-              message="저장된 영수증이 없습니다."
-              description="위에서 영수증을 업로드하고 분석해 보세요."
+              message="저장된 증빙이 없습니다."
+              description="위에서 증빙을 업로드하고 분석해 보세요."
             />
           ) : (
             <>
               {/* Mobile cards */}
               <div className="md:hidden divide-y" style={{ borderTop: "1px solid var(--border-soft)" }}>
-                {receipts.map((r) => (
+                {filteredReceipts.map((r) => (
                   <div key={r.id} className="p-4 space-y-2">
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <p className="font-medium text-sm" style={{ color: "var(--text-main)" }}>{r.store_name ?? "-"}</p>
+                        <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                          <EvidenceDocumentTypeBadge documentType={(r as unknown as Record<string, unknown>).document_type as string || "unknown"} size="xs" />
+                          <p className="font-medium text-sm" style={{ color: "var(--text-main)" }}>{r.store_name ?? "-"}</p>
+                        </div>
                         <p className="text-xs" style={{ color: "var(--text-muted)" }}>{r.receipt_date ?? "-"} · {paymentMethodLabel(r.payment_method)}</p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <StatusBadge status={r.evidence_status} />
+                        <button onClick={() => setEditTarget(r)} className="rounded-lg p-1.5 hover:bg-mist" type="button"
+                          title="수정">
+                          <span style={{ fontSize: 12, color: "var(--primary)" }}>✎</span>
+                        </button>
                         <button onClick={() => setDeleteTarget(r)} className="rounded-lg p-1.5 hover:bg-mist" type="button">
                           <Trash2 className="h-3.5 w-3.5" style={{ color: "var(--danger)" }} />
                         </button>
@@ -516,7 +601,7 @@ export default function ReceiptsPage() {
                     <div className="flex items-center justify-between text-sm">
                       <span style={{ color: "var(--text-muted)" }}>{r.category ?? "-"}</span>
                       <span className="font-medium" style={{ color: "var(--text-main)" }}>
-                        {r.amount != null ? `${r.amount.toLocaleString("ko-KR")}원` : "-"}
+                        {r.amount != null && r.amount > 0 ? `${r.amount.toLocaleString("ko-KR")}원` : "-"}
                       </span>
                     </div>
                     {/* Activity link */}
@@ -552,10 +637,10 @@ export default function ReceiptsPage() {
 
               {/* Desktop table */}
               <div className="hidden md:block overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full text-sm" style={{ minWidth: 900 }}>
                   <thead>
                     <tr style={{ borderBottom: "1px solid var(--border-soft)", background: "var(--surface-soft)" }}>
-                      {["날짜", "가맹점", "금액", "결제방식", "분류", "증빙상태", "확인필요", "연결된 활동", "생성일", ""].map((h) => (
+                      {["문서유형", "날짜", "제목/상호", "금액", "결제방식", "증빙상태", "확인", "연결된 활동", "생성일", ""].map((h) => (
                         <th key={h}
                           className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide"
                           style={{ color: "var(--text-muted)" }}>
@@ -565,29 +650,34 @@ export default function ReceiptsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {receipts.map((r) => (
+                    {filteredReceipts.map((r) => {
+                      const docType = (r as unknown as Record<string, unknown>).document_type as string || "unknown";
+                      const manualData = (r as unknown as Record<string, unknown>).manual_data as Record<string, unknown> | null;
+                      const displayTitle = String(manualData?.title || manualData?.business_name || manualData?.account_holder || r.store_name || "-");
+                      return (
                       <tr key={r.id}
                         className="transition-colors"
                         style={{ borderBottom: "1px solid var(--border-soft)" }}
                         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
                         onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <EvidenceDocumentTypeBadge documentType={docType} size="xs" />
+                        </td>
                         <td className="px-4 py-3 whitespace-nowrap text-xs"
                           style={{ color: "var(--text-muted)" }}>
                           {r.receipt_date ?? "-"}
                         </td>
-                        <td className="px-4 py-3 font-medium max-w-[140px] truncate" title={r.store_name ?? ""} style={{ color: "var(--text-main)" }}>
-                          {r.store_name ?? "-"}
+                        <td className="px-4 py-3 font-medium max-w-[160px] truncate" title={displayTitle} style={{ color: "var(--text-main)" }}>
+                          {displayTitle}
+                          {manualData && <span className="ml-1 text-xs" style={{ color: "var(--primary)" }}>✎</span>}
                         </td>
                         <td className="px-4 py-3 text-right font-medium whitespace-nowrap"
                           style={{ color: "var(--text-main)" }}>
-                          {r.amount != null ? `${r.amount.toLocaleString("ko-KR")}원` : "-"}
+                          {r.amount != null && r.amount > 0 ? `${r.amount.toLocaleString("ko-KR")}원` : "-"}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap"
                           style={{ color: "var(--text-muted)" }}>
                           {paymentMethodLabel(r.payment_method)}
-                        </td>
-                        <td className="px-4 py-3" style={{ color: "var(--text-muted)" }}>
-                          {r.category ?? "-"}
                         </td>
                         <td className="px-4 py-3">
                           <StatusBadge status={r.evidence_status} />
@@ -633,17 +723,28 @@ export default function ReceiptsPage() {
                           {r.created_at ? r.created_at.slice(0, 10) : "-"}
                         </td>
                         <td className="px-4 py-3">
-                          <button
-                            onClick={() => setDeleteTarget(r)}
-                            className="rounded-lg p-1.5 transition-colors hover:bg-mist"
-                            title="영수증 삭제"
-                            type="button"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" style={{ color: "var(--danger)" }} />
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => setEditTarget(r)}
+                              className="rounded-lg p-1.5 transition-colors hover:bg-mist"
+                              title="수정"
+                              type="button"
+                            >
+                              <span style={{ fontSize: 13, color: "var(--primary)" }}>✎</span>
+                            </button>
+                            <button
+                              onClick={() => setDeleteTarget(r)}
+                              className="rounded-lg p-1.5 transition-colors hover:bg-mist"
+                              title="삭제"
+                              type="button"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" style={{ color: "var(--danger)" }} />
+                            </button>
+                          </div>
                         </td>
                       </tr>
-                    ))}
+                    );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -727,6 +828,21 @@ export default function ReceiptsPage() {
             </div>
           </div>
         </Modal>
+      )}
+
+      {/* Evidence edit modal */}
+      {editTarget && (
+        <EvidenceDetailEditModal
+          receipt={{
+            ...editTarget,
+            document_type: (editTarget as unknown as Record<string, unknown>).document_type as string || "unknown",
+            title: (editTarget as unknown as Record<string, unknown>).title as string | null ?? null,
+            parsed_data: (editTarget as unknown as Record<string, unknown>).parsed_data as Record<string, unknown> | null ?? null,
+            manual_data: (editTarget as unknown as Record<string, unknown>).manual_data as Record<string, unknown> | null ?? null,
+          }}
+          onClose={() => setEditTarget(null)}
+          onSaved={handleSaveEdit}
+        />
       )}
     </AppShell>
   );

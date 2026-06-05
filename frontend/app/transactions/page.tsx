@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Upload } from "lucide-react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import { Upload, MoreHorizontal } from "lucide-react";
 import {
   BankStatementImportResponse,
   BankStatementPreviewResponse,
@@ -14,8 +14,11 @@ import {
   matchRefundTransaction,
   unmatchRefundTransaction,
   getRefundRecords,
+  budgetExcludeTransaction,
+  budgetIncludeTransaction,
   type RefundRecord,
 } from "@/lib/api";
+import { QuarterFilter } from "@/components/budget/QuarterFilter";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/Button";
@@ -25,6 +28,13 @@ import { ErrorState } from "@/components/ui/ErrorState";
 import { LoadingState } from "@/components/ui/LoadingState";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+
+const menuItemStyle: React.CSSProperties = {
+  display: "block", width: "100%", textAlign: "left",
+  padding: "8px 14px", fontSize: 13, cursor: "pointer",
+  background: "none", border: "none", color: "var(--text-main)",
+  transition: "background 0.1s",
+};
 
 function fmt(n: number | null | undefined): string {
   if (n == null) return "-";
@@ -57,10 +67,16 @@ export default function TransactionsPage() {
   const [filters, setFilters] = useState<TransactionQueryParams>({
     q: "", match_status: "", payment_type: "", start_date: "", end_date: "",
   });
+  const [operatingQuarter, setOperatingQuarter] = useState<string>("");
   const [txPageSize, setTxPageSize] = useState<number | "all">("all");
   const [txPage, setTxPage] = useState(1);
+  const [excludeBusy, setExcludeBusy] = useState<string | null>(null);
+  const [excludeModal, setExcludeModal] = useState<BankTransaction | null>(null);
+  const [excludeReason, setExcludeReason] = useState<string>("");
+  const [excludeType, setExcludeType] = useState<"income" | "expense" | "both">("both");
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
-  const loadTransactions = async (f: TransactionQueryParams = filters) => {
+  const loadTransactions = async (f: TransactionQueryParams = filters, quarter: string = operatingQuarter) => {
     setLoading(true);
     setListError(null);
     setTxPage(1);
@@ -69,13 +85,55 @@ export default function TransactionsPage() {
       if (f.q) params.q = f.q;
       if (f.match_status) params.match_status = f.match_status;
       if (f.payment_type) params.payment_type = f.payment_type;
-      if (f.start_date) params.start_date = f.start_date;
-      if (f.end_date) params.end_date = f.end_date;
+      if (quarter) {
+        params.operating_quarter = quarter;
+      } else {
+        if (f.start_date) params.start_date = f.start_date;
+        if (f.end_date) params.end_date = f.end_date;
+      }
       setTransactions(await getTransactionsTyped(params));
     } catch (e: unknown) {
       setListError(e instanceof Error ? e.message : "불러오기 실패");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleExclude = async (txn: BankTransaction) => {
+    setExcludeModal(txn);
+    setExcludeReason("");
+    setExcludeType("both");
+  };
+
+  const confirmExclude = async () => {
+    if (!excludeModal) return;
+    setExcludeBusy(excludeModal.id);
+    try {
+      await budgetExcludeTransaction(excludeModal.id, {
+        exclude_from_budget: excludeType === "both",
+        exclude_from_income: excludeType === "income" || excludeType === "both",
+        exclude_from_expense: excludeType === "expense" || excludeType === "both",
+        reason: excludeReason,
+      });
+      setExcludeModal(null);
+      await loadTransactions();
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : "제외 처리 실패");
+    } finally {
+      setExcludeBusy(null);
+    }
+  };
+
+  const handleInclude = async (txn: BankTransaction) => {
+    if (!confirm("예산 제외를 해제하시겠습니까?")) return;
+    setExcludeBusy(txn.id);
+    try {
+      await budgetIncludeTransaction(txn.id);
+      await loadTransactions();
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : "해제 실패");
+    } finally {
+      setExcludeBusy(null);
     }
   };
 
@@ -380,6 +438,15 @@ export default function TransactionsPage() {
           {/* Filters */}
           <div className="flex flex-wrap gap-3 p-5"
             style={{ borderBottom: "1px solid var(--border-soft)" }}>
+            {/* 분기 필터 */}
+            <QuarterFilter
+              value={operatingQuarter}
+              onChange={(q) => {
+                setOperatingQuarter(q);
+                loadTransactions(filters, q);
+              }}
+              label="분기"
+            />
             <input
               type="text"
               placeholder="검색 (적요/구분/거래점)"
@@ -405,6 +472,7 @@ export default function TransactionsPage() {
               <option value="">매칭상태 전체</option>
               <option value="unmatched">미매칭</option>
               <option value="matched">매칭됨</option>
+              <option value="need_check">확인필요</option>
               <option value="ignored">무시</option>
             </select>
             <select
@@ -421,32 +489,80 @@ export default function TransactionsPage() {
               <option value="membership_fee">회비</option>
               <option value="activity_fee">활동비</option>
             </select>
-            <input
-              type="date"
-              value={filters.start_date ?? ""}
-              onChange={(e) => setFilters((f) => ({ ...f, start_date: e.target.value }))}
-              className="rounded-xl px-3 py-2 text-sm focus:outline-none"
-              style={{
-                background: "var(--surface)",
-                color: "var(--text-main)",
-                border: "1px solid var(--border-soft)",
-              }}
-            />
-            <input
-              type="date"
-              value={filters.end_date ?? ""}
-              onChange={(e) => setFilters((f) => ({ ...f, end_date: e.target.value }))}
-              className="rounded-xl px-3 py-2 text-sm focus:outline-none"
-              style={{
-                background: "var(--surface)",
-                color: "var(--text-main)",
-                border: "1px solid var(--border-soft)",
-              }}
-            />
+            {!operatingQuarter && (
+              <>
+                <input
+                  type="date"
+                  value={filters.start_date ?? ""}
+                  onChange={(e) => setFilters((f) => ({ ...f, start_date: e.target.value }))}
+                  className="rounded-xl px-3 py-2 text-sm focus:outline-none"
+                  style={{
+                    background: "var(--surface)",
+                    color: "var(--text-main)",
+                    border: "1px solid var(--border-soft)",
+                  }}
+                />
+                <input
+                  type="date"
+                  value={filters.end_date ?? ""}
+                  onChange={(e) => setFilters((f) => ({ ...f, end_date: e.target.value }))}
+                  className="rounded-xl px-3 py-2 text-sm focus:outline-none"
+                  style={{
+                    background: "var(--surface)",
+                    color: "var(--text-main)",
+                    border: "1px solid var(--border-soft)",
+                  }}
+                />
+              </>
+            )}
             <Button variant="primary" size="sm" onClick={() => loadTransactions()}>
               검색
             </Button>
           </div>
+
+          {/* Budget Exclusion Modal */}
+          {excludeModal && (
+            <div style={{
+              position: "fixed", inset: 0, zIndex: 9999,
+              background: "rgba(0,0,0,0.5)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <div style={{
+                background: "var(--surface)", borderRadius: 16, padding: 24,
+                minWidth: 340, maxWidth: 480, boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
+              }}>
+                <h3 style={{ fontWeight: 600, marginBottom: 12 }}>예산 집계 제외</h3>
+                <p style={{ fontSize: 13, color: "var(--text-sub)", marginBottom: 16 }}>
+                  <b>{excludeModal.memo ?? "(적요 없음)"}</b><br />
+                  {excludeModal.deposit_amount > 0
+                    ? `입금 ${excludeModal.deposit_amount.toLocaleString()}원`
+                    : `출금 ${excludeModal.withdraw_amount.toLocaleString()}원`}
+                </p>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ fontSize: 13, fontWeight: 500, display: "block", marginBottom: 6 }}>제외 유형</label>
+                  <select value={excludeType} onChange={(e) => setExcludeType(e.target.value as "income" | "expense" | "both")}
+                    style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border-soft)", background: "var(--surface)", color: "var(--text-main)", fontSize: 13 }}>
+                    <option value="both">예산 집계 전체 제외</option>
+                    <option value="income">수입에서만 제외</option>
+                    <option value="expense">지출에서만 제외</option>
+                  </select>
+                </div>
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 13, fontWeight: 500, display: "block", marginBottom: 6 }}>사유</label>
+                  <input type="text" value={excludeReason} onChange={(e) => setExcludeReason(e.target.value)}
+                    placeholder="제외 사유를 입력하세요"
+                    style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border-soft)", background: "var(--surface)", color: "var(--text-main)", fontSize: 13, boxSizing: "border-box" }}
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                  <Button variant="ghost" size="sm" onClick={() => setExcludeModal(null)}>취소</Button>
+                  <Button variant="primary" size="sm" onClick={confirmExclude} disabled={excludeBusy !== null}>
+                    {excludeBusy ? "처리중..." : "제외 확정"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {listError && (
             <div className="p-5">
@@ -465,10 +581,20 @@ export default function TransactionsPage() {
             <>
             {/* Mobile cards */}
             <div className="md:hidden divide-y" style={{ borderTop: "1px solid var(--border-soft)" }}>
-              {pagedTransactions.map((t) => (
+              {pagedTransactions.map((t) => {
+                const isExcluded = t.exclude_from_budget || t.exclude_from_income || t.exclude_from_expense;
+                return (
                 <div key={t.id} className="p-4 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium truncate max-w-[180px]" style={{ color: "var(--text-main)" }}>{t.memo ?? "-"}</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate" style={{ color: "var(--text-main)" }}>{t.memo ?? "-"}</p>
+                      {isExcluded && (
+                        <span className="shrink-0 text-xs rounded px-1.5 py-0.5"
+                          style={{ background: "#fef3c7", color: "#92400e", fontSize: 10, fontWeight: 600 }}>
+                          {t.exclude_from_budget ? "전체제외" : t.exclude_from_income ? "수입제외" : "지출제외"}
+                        </span>
+                      )}
+                    </div>
                     <StatusBadge status={t.match_status} />
                   </div>
                   <p className="text-xs" style={{ color: "var(--text-muted)" }}>{fmtDate(t.transaction_datetime)}</p>
@@ -476,16 +602,34 @@ export default function TransactionsPage() {
                     {t.deposit_amount > 0 && <span className="font-medium" style={{ color: "var(--success)" }}>+{fmt(t.deposit_amount)}원</span>}
                     {t.withdraw_amount > 0 && <span className="font-medium" style={{ color: "var(--danger)" }}>-{fmt(t.withdraw_amount)}원</span>}
                     <span className="text-xs" style={{ color: "var(--text-muted)" }}>잔 {fmt(t.balance)}원</span>
+                    <span className="flex-1" />
+                    {isExcluded ? (
+                      <button
+                        className="text-xs"
+                        style={{ color: "#d97706", fontWeight: 500 }}
+                        disabled={excludeBusy === t.id}
+                        onClick={() => handleInclude(t)}>
+                        {excludeBusy === t.id ? "..." : "제외 해제"}
+                      </button>
+                    ) : (
+                      <button
+                        className="text-xs"
+                        style={{ color: "var(--text-muted)" }}
+                        onClick={() => handleExclude(t)}>
+                        예산제외
+                      </button>
+                    )}
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
             {/* Desktop table */}
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-sm" style={{ minWidth: 1040 }}>
+              <table className="w-full text-sm" style={{ minWidth: 860 }}>
                 <thead>
                   <tr style={{ background: "var(--surface-soft)", borderBottom: "1px solid var(--border-soft)" }}>
-                    {["거래일시", "구분", "적요", "출금액", "입금액", "잔액", "거래점", "매칭상태", "납부유형", "생성일", "매칭 취소", "환불 매칭"].map((h) => (
+                    {["거래일시", "구분", "적요", "출금액", "입금액", "잔액", "거래점", "매칭상태", "납부유형", ""].map((h) => (
                       <th key={h}
                         className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide"
                         style={{ color: "var(--text-muted)" }}>
@@ -495,20 +639,28 @@ export default function TransactionsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {pagedTransactions.map((t) => (
+                  {pagedTransactions.map((t) => {
+                    const isExcluded = !!(t.exclude_from_budget || t.exclude_from_income || t.exclude_from_expense);
+                    const menuOpen = openMenuId === t.id;
+                    return (
                     <tr key={t.id}
-                      style={{ borderBottom: "1px solid var(--border-soft)" }}
+                      style={{ borderBottom: "1px solid var(--border-soft)", position: "relative" }}
                       onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-soft)")}
                       onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                      <td className="px-4 py-3 whitespace-nowrap text-xs"
-                        style={{ color: "var(--text-muted)" }}>
+                      <td className="px-4 py-3 whitespace-nowrap text-xs" style={{ color: "var(--text-muted)" }}>
                         {fmtDate(t.transaction_datetime)}
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap text-xs" style={{ color: "var(--text-main)" }}>
                         {t.transaction_type ?? "-"}
                       </td>
-                      <td className="px-4 py-3 max-w-[200px] truncate" title={t.memo ?? ""} style={{ color: "var(--text-main)" }}>
+                      <td className="px-4 py-3 max-w-[220px] truncate" title={t.memo ?? ""} style={{ color: "var(--text-main)" }}>
                         {t.memo ?? "-"}
+                        {isExcluded && (
+                          <span className="ml-1 text-xs rounded px-1"
+                            style={{ background: "#fef3c7", color: "#92400e", fontSize: 10 }}>
+                            {t.exclude_from_budget ? "전체제외" : t.exclude_from_income ? "수입제외" : "지출제외"}
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right font-medium whitespace-nowrap"
                         style={{ color: t.withdraw_amount ? "var(--danger)" : "var(--text-muted)" }}>
@@ -521,7 +673,7 @@ export default function TransactionsPage() {
                       <td className="px-4 py-3 text-right whitespace-nowrap" style={{ color: "var(--text-main)" }}>
                         {fmt(t.balance)}
                       </td>
-                      <td className="px-4 py-3 max-w-[120px] truncate" title={t.branch ?? ""} style={{ color: "var(--text-muted)" }}>
+                      <td className="px-4 py-3 max-w-[100px] truncate" title={t.branch ?? ""} style={{ color: "var(--text-muted)" }}>
                         {t.branch ?? "-"}
                       </td>
                       <td className="px-4 py-3">
@@ -530,33 +682,99 @@ export default function TransactionsPage() {
                       <td className="px-4 py-3 text-xs whitespace-nowrap" style={{ color: "var(--text-muted)" }}>
                         {t.payment_type ?? "-"}
                       </td>
-                      <td className="px-4 py-3 whitespace-nowrap text-xs"
-                        style={{ color: "var(--text-muted)" }}>
-                        {fmtDate(t.created_at)}
-                      </td>
-                      <td className="px-4 py-3">
-                        {t.match_status === "matched" && (
-                          <Button size="sm" variant="ghost" disabled={unmatching === t.id}
-                            onClick={() => handleUnmatch(t.id)}>
-                            {unmatching === t.id ? "..." : "매칭 취소"}
-                          </Button>
+                      {/* ⋯ 액션 드롭다운 */}
+                      <td className="px-3 py-3" style={{ position: "relative" }}>
+                        <button
+                          onClick={() => setOpenMenuId(menuOpen ? null : t.id)}
+                          style={{
+                            width: 28, height: 28, borderRadius: 8, border: "1px solid var(--border-soft)",
+                            background: menuOpen ? "var(--surface-soft)" : "transparent",
+                            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                            color: "var(--text-muted)",
+                          }}
+                        >
+                          <MoreHorizontal size={15} />
+                        </button>
+                        {menuOpen && (
+                          <>
+                            {/* 바깥 클릭 닫기 오버레이 */}
+                            <div
+                              style={{ position: "fixed", inset: 0, zIndex: 40 }}
+                              onClick={() => setOpenMenuId(null)}
+                            />
+                            <div style={{
+                              position: "absolute", right: 0, top: 32, zIndex: 50,
+                              background: "var(--surface)", border: "1px solid var(--border-soft)",
+                              borderRadius: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+                              minWidth: 156, padding: "4px 0", overflow: "hidden",
+                            }}>
+                              {/* 매칭 취소 */}
+                              {t.match_status === "matched" && (
+                                <button onClick={() => { setOpenMenuId(null); handleUnmatch(t.id); }}
+                                  style={menuItemStyle} disabled={unmatching === t.id}>
+                                  {unmatching === t.id ? "처리 중..." : "매칭 취소"}
+                                </button>
+                              )}
+                              {/* 환불 취소 */}
+                              {t.match_status === "refund_matched" && (
+                                <button onClick={() => { setOpenMenuId(null); handleUnmatchRefund(t.id); }}
+                                  style={menuItemStyle} disabled={unmatching === t.id}>
+                                  환불 취소
+                                </button>
+                              )}
+                              {/* 환불로 매칭 */}
+                              {t.withdraw_amount > 0 && t.match_status !== "matched" && t.match_status !== "refund_matched" && (
+                                <button onClick={() => { setOpenMenuId(null); openRefundMatch(t); }}
+                                  style={menuItemStyle}>
+                                  환불로 매칭
+                                </button>
+                              )}
+                              {/* 구분선 */}
+                              {(t.match_status === "matched" || t.match_status === "refund_matched" ||
+                                (t.withdraw_amount > 0 && t.match_status !== "matched")) && (
+                                <div style={{ height: 1, background: "var(--border-soft)", margin: "4px 0" }} />
+                              )}
+                              {/* 예산 제외 관련 */}
+                              {isExcluded ? (
+                                <>
+                                  <button onClick={() => { setOpenMenuId(null); handleInclude(t); }}
+                                    style={{ ...menuItemStyle, color: "#d97706" }}
+                                    disabled={excludeBusy === t.id}>
+                                    {excludeBusy === t.id ? "처리 중..." : "제외 해제"}
+                                  </button>
+                                  {t.exclude_reason && (
+                                    <div style={{ padding: "4px 14px 6px", fontSize: 11, color: "var(--text-muted)" }}>
+                                      사유: {t.exclude_reason}
+                                    </div>
+                                  )}
+                                </>
+                              ) : (
+                                <>
+                                  {t.deposit_amount > 0 && (
+                                    <button onClick={() => { setOpenMenuId(null); setExcludeType("income"); handleExclude(t); }}
+                                      style={menuItemStyle}>
+                                      수입에서 제외
+                                    </button>
+                                  )}
+                                  {t.withdraw_amount > 0 && (
+                                    <button onClick={() => { setOpenMenuId(null); setExcludeType("expense"); handleExclude(t); }}
+                                      style={menuItemStyle}>
+                                      지출에서 제외
+                                    </button>
+                                  )}
+                                  <button onClick={() => { setOpenMenuId(null); setExcludeType("both"); handleExclude(t); }}
+                                    style={menuItemStyle}>
+                                    예산 전체 제외
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </>
                         )}
                       </td>
-                      <td className="px-4 py-3">
-                        {t.match_status === "refund_matched" ? (
-                          <Button size="sm" variant="ghost" disabled={unmatching === t.id}
-                            onClick={() => handleUnmatchRefund(t.id)}>
-                            {unmatching === t.id ? "..." : "환불취소"}
-                          </Button>
-                        ) : t.withdraw_amount > 0 && t.match_status !== "matched" ? (
-                          <Button size="sm" variant="ghost"
-                            onClick={() => openRefundMatch(t)}>
-                            환불로 매칭
-                          </Button>
-                        ) : null}
-                      </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

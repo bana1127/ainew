@@ -36,6 +36,7 @@ import {
   type ActivityFile,
   type FilePreviewResult,
   type SubmissionPackagePreview,
+  type ActivityEvidence,
   addActivityParticipant,
   deleteActivity,
   getActivityDetail,
@@ -48,6 +49,9 @@ import {
   updateActivityReport,
   generateActivityReportDraft,
   executeAssistant,
+  uploadActivityEvidence,
+  getActivityEvidence,
+  updateReceiptManualData,
   type ActivityReportGenerateRequest,
   type ActivityCategory,
   type FormImportPreview,
@@ -81,6 +85,8 @@ import {
 } from "@/lib/api";
 import { AssistantResultCard } from "@/components/assistant/AssistantResultCard";
 import { ActivityFeeTab } from "@/components/activity/ActivityFeeTab";
+import { EvidenceDocumentTypeBadge } from "@/components/evidence/EvidenceDocumentTypeBadge";
+import { EvidenceDetailEditModal } from "@/components/evidence/EvidenceDetailEditModal";
 import { nanoid } from "nanoid";
 
 type TabKey = "ai" | "overview" | "participants" | "report" | "fees" | "receipts" | "files" | "import";
@@ -1193,6 +1199,18 @@ function DocumentGenerationSection({
 
 // ─── Receipts Tab ─────────────────────────────────────────────────────────────
 
+const DOCUMENT_TYPE_OPTIONS_UPLOAD = [
+  { value: "unknown", label: "자동 감지" },
+  { value: "receipt", label: "영수증" },
+  { value: "business_registration", label: "사업자등록증" },
+  { value: "bankbook_copy", label: "통장 사본" },
+  { value: "transfer_confirmation", label: "계좌이체 확인서" },
+  { value: "invoice", label: "청구서" },
+  { value: "quote", label: "견적서" },
+  { value: "transaction_statement", label: "거래명세서" },
+  { value: "other", label: "기타 증빙" },
+];
+
 function ReceiptsTab({
   activityId,
   receipts,
@@ -1204,6 +1222,7 @@ function ReceiptsTab({
 }) {
   const receiptFileRef = React.useRef<HTMLInputElement>(null);
   const [allReceipts, setAllReceipts] = useState<Receipt[]>([]);
+  const [evidenceList, setEvidenceList] = useState<ActivityEvidence[]>([]);
   const [showLink, setShowLink] = useState(false);
   const [linking, setLinking] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -1211,6 +1230,15 @@ function ReceiptsTab({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [previewReceiptId, setPreviewReceiptId] = useState<string | null>(null);
+  const [selectedDocType, setSelectedDocType] = useState("unknown");
+  const [editTarget, setEditTarget] = useState<ActivityEvidence | null>(null);
+
+  async function loadEvidence() {
+    try {
+      const data = await getActivityEvidence(activityId);
+      setEvidenceList(data);
+    } catch { /* ignore */ }
+  }
 
   async function loadAll() {
     try {
@@ -1218,6 +1246,10 @@ function ReceiptsTab({
       setAllReceipts(data);
     } catch { /* ignore */ }
   }
+
+  useEffect(() => {
+    loadEvidence();
+  }, [activityId, receipts]);
 
   useEffect(() => {
     if (showLink) loadAll();
@@ -1235,6 +1267,7 @@ function ReceiptsTab({
       await linkReceiptToActivity(receiptId, activityId);
       setShowLink(false);
       onUpdated();
+      await loadEvidence();
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : "연결에 실패했습니다.");
     } finally {
@@ -1248,6 +1281,7 @@ function ReceiptsTab({
     try {
       await linkReceiptToActivity(receiptId, null);
       onUpdated();
+      await loadEvidence();
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : "연결 해제에 실패했습니다.");
     } finally {
@@ -1255,28 +1289,51 @@ function ReceiptsTab({
     }
   }
 
+  // ★ Fixed: use direct evidence upload API instead of AI assistant
   async function handleReceiptUpload() {
     if (!uploadFile) return;
     setUploading(true);
     setUploadError(null);
     try {
-      // Upload via AI assistant with activity context so receipt + file are both created
-      const fd = new FormData();
-      fd.append("files", uploadFile);
-      fd.append("activity_id", activityId);
-      fd.append("activity_mode", "link_existing");
-      fd.append("requested_intent", "receipt_analysis");
-      fd.append("auto_apply", "true");
-      await executeAssistant(fd);
+      await uploadActivityEvidence(activityId, uploadFile, {
+        document_type: selectedDocType,
+        save_to_db: true,
+      });
       setUploadFile(null);
+      setSelectedDocType("unknown");
       if (receiptFileRef.current) receiptFileRef.current.value = "";
       onUpdated();
+      await loadEvidence();
     } catch (err: unknown) {
-      setUploadError(err instanceof Error ? err.message : "영수증 업로드 실패");
+      setUploadError(err instanceof Error ? err.message : "증빙 업로드 실패");
     } finally {
       setUploading(false);
     }
   }
+
+  async function handleSaveEdit(receiptId: string, manualData: Record<string, unknown>, docType: string) {
+    await updateReceiptManualData(receiptId, {
+      manual_data: manualData,
+      document_type: docType,
+      title: String(manualData.title || manualData.business_name || manualData.account_holder || ""),
+      amount: manualData.amount ? Number(manualData.amount) : undefined,
+      receipt_date: String(manualData.receipt_date || manualData.transfer_date || manualData.opening_date || ""),
+    });
+    setEditTarget(null);
+    await loadEvidence();
+    onUpdated();
+  }
+
+  // Show evidence list (from direct API call) if available, otherwise fall back to receipts prop
+  const displayEvidence = evidenceList.length > 0 ? evidenceList : receipts.map((r) => ({
+    ...r,
+    document_type: (r as unknown as Record<string, unknown>).document_type as string || "unknown",
+    title: r.store_name,
+    display_data: {},
+    transaction_id: null,
+    parsed_data: null,
+    manual_data: null,
+  })) as unknown as ActivityEvidence[];
 
   return (
     <Card padding="none">
@@ -1285,15 +1342,15 @@ function ReceiptsTab({
         style={{ borderBottom: "1px solid var(--border-soft)" }}
       >
         <h3 className="text-sm font-semibold" style={{ color: "var(--text-main)" }}>
-          영수증/증빙 ({receipts.length}건)
+          증빙 ({displayEvidence.length}건)
         </h3>
         <div className="flex gap-2">
           <Button size="sm" variant="secondary" onClick={() => setShowLink(true)}>
             <Plus className="h-3.5 w-3.5" />
-            기존 영수증 연결
+            기존 증빙 연결
           </Button>
           <Button size="sm" variant="ghost" onClick={() => receiptFileRef.current?.click()}>
-            영수증 분석 업로드
+            증빙 파일 업로드
           </Button>
           <input
             ref={receiptFileRef}
@@ -1304,14 +1361,33 @@ function ReceiptsTab({
           />
         </div>
       </div>
-      {/* Direct receipt upload */}
+
+      {/* Upload panel */}
       {uploadFile && (
-        <div className="p-3 flex items-center gap-3" style={{ borderBottom: "1px solid var(--border-soft)", background: "var(--surface-soft)" }}>
-          <span className="text-xs flex-1 truncate" style={{ color: "var(--text-main)" }}>{uploadFile.name}</span>
-          <Button size="sm" onClick={handleReceiptUpload} loading={uploading}>
-            분석 후 저장
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => { setUploadFile(null); setUploadError(null); }}>취소</Button>
+        <div className="p-3 space-y-2" style={{ borderBottom: "1px solid var(--border-soft)", background: "var(--surface-soft)" }}>
+          <div className="flex items-center gap-2">
+            <span className="text-xs flex-1 truncate" style={{ color: "var(--text-main)" }}>{uploadFile.name}</span>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={selectedDocType}
+              onChange={(e) => setSelectedDocType(e.target.value)}
+              style={{
+                padding: "5px 8px", borderRadius: 8, fontSize: 12,
+                border: "1px solid var(--border-soft)", background: "var(--surface)", color: "var(--text-main)",
+                maxWidth: 180,
+              }}
+            >
+              {DOCUMENT_TYPE_OPTIONS_UPLOAD.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            <Button size="sm" onClick={handleReceiptUpload} disabled={uploading}>
+              {uploading ? "분석 중..." : "분석 후 저장"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => { setUploadFile(null); setUploadError(null); }}>취소</Button>
+          </div>
+          {uploading && <p className="text-xs" style={{ color: "var(--text-muted)" }}>업로드 및 분석 중입니다...</p>}
         </div>
       )}
       {uploadError && (
@@ -1323,13 +1399,13 @@ function ReceiptsTab({
       )}
 
       {/* 증빙 요약 */}
-      {receipts.length > 0 && (
+      {displayEvidence.length > 0 && (
         <div className="px-4 py-3 grid grid-cols-2 sm:grid-cols-4 gap-2" style={{ borderBottom: "1px solid var(--border-soft)" }}>
           {[
-            { label: "전체", value: receipts.length, color: "var(--text-main)" },
-            { label: "분석 완료", value: receipts.filter(r => r.evidence_status !== "pending").length, color: "var(--success)" },
-            { label: "분석 대기", value: receipts.filter(r => r.evidence_status === "pending").length, color: "var(--warning)" },
-            { label: "확인 필요", value: receipts.filter(r => r.need_check).length, color: "var(--danger)" },
+            { label: "전체", value: displayEvidence.length, color: "var(--text-main)" },
+            { label: "분석 완료", value: displayEvidence.filter(r => r.evidence_status !== "pending").length, color: "var(--success)" },
+            { label: "분석 대기", value: displayEvidence.filter(r => r.evidence_status === "pending").length, color: "var(--warning)" },
+            { label: "확인 필요", value: displayEvidence.filter(r => r.need_check).length, color: "var(--danger)" },
           ].map(({ label, value, color }) => (
             <div key={label} className="rounded-xl p-2.5 text-center" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
               <p className="text-xs" style={{ color: "var(--text-muted)" }}>{label}</p>
@@ -1339,91 +1415,106 @@ function ReceiptsTab({
         </div>
       )}
 
-      {receipts.length === 0 ? (
+      {displayEvidence.length === 0 ? (
         <EmptyState
-          message="연결된 영수증이 없습니다."
-          description="영수증 업로드 후 이 활동에 연결하세요."
+          message="연결된 증빙이 없습니다."
+          description="증빙 파일을 업로드하거나 기존 증빙을 연결하세요."
         />
       ) : (
         <div className="divide-y" style={{ borderTop: "1px solid var(--border-soft)" }}>
-          {receipts.map((r) => (
-            <div key={r.id} className="p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-sm" style={{ color: "var(--text-main)" }}>
-                    {r.store_name ?? "(상호명 없음)"}
-                    {r.amount > 0 && (
-                      <span className="ml-2 text-xs" style={{ color: "var(--text-muted)" }}>
-                        {fmt(r.amount)}원
-                      </span>
-                    )}
-                  </p>
-                  <div className="flex flex-wrap items-center gap-2 mt-0.5">
-                    {r.receipt_date && (
-                      <span className="text-xs" style={{ color: "var(--text-muted)" }}>{r.receipt_date}</span>
-                    )}
-                    <StatusBadge status={r.evidence_status} />
-                    {r.need_check && (
-                      <span className="text-xs rounded-full px-2 py-0.5"
-                        style={{ background: "var(--warning-soft)", color: "var(--warning)" }}>
-                        확인 필요
-                      </span>
-                    )}
+          {displayEvidence.map((r) => {
+            const displayTitle = (r.manual_data as Record<string, unknown> | null)?.title
+              || (r.manual_data as Record<string, unknown> | null)?.business_name
+              || r.title || r.store_name || "(제목 없음)";
+            return (
+              <div key={r.id} className="p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                      <EvidenceDocumentTypeBadge documentType={r.document_type || "unknown"} size="xs" />
+                      <p className="font-medium text-sm" style={{ color: "var(--text-main)" }}>
+                        {String(displayTitle)}
+                        {r.amount > 0 && (
+                          <span className="ml-2 text-xs" style={{ color: "var(--text-muted)" }}>
+                            {fmt(r.amount)}원
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {r.receipt_date && (
+                        <span className="text-xs" style={{ color: "var(--text-muted)" }}>{r.receipt_date}</span>
+                      )}
+                      <StatusBadge status={r.evidence_status} />
+                      {r.need_check && (
+                        <span className="text-xs rounded-full px-2 py-0.5"
+                          style={{ background: "var(--warning-soft)", color: "var(--warning)" }}>
+                          확인 필요
+                        </span>
+                      )}
+                      {r.manual_data && (
+                        <span className="text-xs" style={{ color: "var(--primary)", fontWeight: 500 }}>수정됨</span>
+                      )}
+                      {r.file_id && (
+                        <button
+                          className="text-xs"
+                          style={{ color: "var(--primary)" }}
+                          onClick={() => setPreviewReceiptId(previewReceiptId === r.id ? null : r.id)}
+                        >
+                          {previewReceiptId === r.id ? "이미지 닫기" : "이미지 보기"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex gap-1 items-center flex-wrap justify-end">
+                    <Button size="sm" variant="ghost" style={{ fontSize: 11 }}
+                      onClick={() => setEditTarget(r)}>
+                      수정
+                    </Button>
                     {r.file_id && (
-                      <button
-                        className="text-xs"
-                        style={{ color: "var(--primary)" }}
-                        onClick={() => setPreviewReceiptId(previewReceiptId === r.id ? null : r.id)}
-                      >
-                        {previewReceiptId === r.id ? "이미지 닫기" : "이미지 보기"}
-                      </button>
+                      <a href={`/api/files/${r.file_id}/download`} download>
+                        <Button size="sm" variant="ghost">
+                          <Download className="h-3.5 w-3.5" />
+                        </Button>
+                      </a>
                     )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      style={{ fontSize: 11 }}
+                      onClick={() => handleUnlink(r.id)}
+                      disabled={linking === r.id}
+                    >
+                      연결 해제
+                    </Button>
                   </div>
                 </div>
-                <div className="flex gap-2 items-center">
-                  {r.file_id && (
-                    <a href={`/api/files/${r.file_id}/download`} download>
-                      <Button size="sm" variant="ghost">
-                        <Download className="h-3.5 w-3.5" />
-                      </Button>
-                    </a>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => handleUnlink(r.id)}
-                    disabled={linking === r.id}
-                  >
-                    연결 해제
-                  </Button>
-                </div>
+                {r.file_id && previewReceiptId === r.id && (
+                  <div className="mt-3">
+                    <img
+                      src={`/api/files/${r.file_id}/preview/inline`}
+                      alt={String(displayTitle)}
+                      className="max-w-full rounded-xl"
+                      style={{ maxHeight: 320, border: "1px solid var(--border-soft)" }}
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).style.display = "none";
+                      }}
+                    />
+                  </div>
+                )}
               </div>
-              {/* Inline image preview */}
-              {r.file_id && previewReceiptId === r.id && (
-                <div className="mt-3">
-                  <img
-                    src={`/api/files/${r.file_id}/preview/inline`}
-                    alt={r.store_name ?? "영수증"}
-                    className="max-w-full rounded-xl"
-                    style={{ maxHeight: 320, border: "1px solid var(--border-soft)" }}
-                    onError={(e) => {
-                      (e.currentTarget as HTMLImageElement).style.display = "none";
-                    }}
-                  />
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
-      {/* Link receipt modal */}
+      {/* Link evidence modal */}
       {showLink && (
-        <Modal isOpen onClose={() => setShowLink(false)} title="기존 영수증 연결">
+        <Modal isOpen onClose={() => setShowLink(false)} title="기존 증빙 연결">
           <div className="space-y-3">
             {unlinkable.length === 0 ? (
               <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-                연결할 수 있는 영수증이 없습니다. 먼저 영수증을 업로드하세요.
+                연결할 수 있는 증빙이 없습니다. 먼저 증빙을 업로드하세요.
               </p>
             ) : (
               <div className="max-h-64 overflow-y-auto space-y-2">
@@ -1458,6 +1549,15 @@ function ReceiptsTab({
             <Button variant="secondary" onClick={() => setShowLink(false)}>닫기</Button>
           </div>
         </Modal>
+      )}
+
+      {/* Evidence edit modal */}
+      {editTarget && (
+        <EvidenceDetailEditModal
+          receipt={editTarget}
+          onClose={() => setEditTarget(null)}
+          onSaved={handleSaveEdit}
+        />
       )}
     </Card>
   );

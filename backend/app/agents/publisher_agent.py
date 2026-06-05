@@ -60,8 +60,28 @@ class PublisherAgent:
         evidence_status: str,
         need_check: bool,
         reason: str,
+        document_type: str = "unknown",
     ) -> tuple[UUID, bool]:
         from app.models.receipt import Receipt
+        from app.models.file import UploadedFile
+        from app.services.evidence_parser_service import (
+            detect_document_type_from_text,
+            policy_for_document_type,
+        )
+
+        # Auto-detect document_type from raw_text if still unknown
+        raw_text = extracted.get("raw_text") or ""
+        if document_type in ("unknown", "auto", None):
+            detected = detect_document_type_from_text(raw_text)
+            document_type = detected if detected != "unknown" else document_type
+
+        # Override policy for non-receipt document types (business_registration, bankbook_copy)
+        amount_val = int(extracted.get("amount", 0))
+        if document_type in ("business_registration", "bankbook_copy"):
+            evidence_status, need_check, reason = policy_for_document_type(document_type, amount_val)
+        elif document_type == "unknown" and evidence_status == "need_check" and amount_val <= 0:
+            # Still unknown, but no amount: keep as pending rather than need_check for unknown docs
+            pass
 
         # Parse receipt_date
         receipt_date: date_type | None = None
@@ -71,6 +91,14 @@ class PublisherAgent:
                 receipt_date = date_type.fromisoformat(str(raw_date))
             except ValueError:
                 pass
+
+        parsed_data = {
+            k: v for k, v in extracted.items()
+            if k not in ("receipt_date", "raw_text")
+        }
+        # Also store raw_text in parsed_data for reference
+        if raw_text:
+            parsed_data["raw_text_preview"] = raw_text[:500]
 
         receipt = Receipt(
             file_id=file_id,
@@ -83,8 +111,23 @@ class PublisherAgent:
             evidence_status=evidence_status,
             need_check=need_check,
             reason=reason,
+            document_type=document_type,
+            parsed_data=parsed_data,
         )
         self.db.add(receipt)
+        self.db.flush()  # get receipt.id before commit
+
+        # Task 43: Sync UploadedFile so it appears in the activity file vault
+        if file_id:
+            uploaded_file = self.db.get(UploadedFile, file_id)
+            if uploaded_file:
+                uploaded_file.file_category = "evidence"
+                uploaded_file.file_role = "evidence"
+                if activity_report_id:
+                    uploaded_file.activity_report_id = activity_report_id
+                    uploaded_file.related_entity_type = "activity_report"
+                    uploaded_file.related_entity_id = activity_report_id
+
         self.db.commit()
         self.db.refresh(receipt)
         return receipt.id, True

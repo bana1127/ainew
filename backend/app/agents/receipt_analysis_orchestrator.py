@@ -22,6 +22,7 @@ class ReceiptOrchestratorInput:
     save_to_db: bool = True
     manual_payment_method: str | None = None
     manual_category: str | None = None
+    document_type: str = "unknown"
 
 
 @dataclass
@@ -53,6 +54,7 @@ class ReceiptOrchestratorOutput:
     policy: PolicyData
     saved: bool
     model: str
+    document_type: str = "unknown"
 
 
 class ReceiptAnalysisOrchestrator:
@@ -115,6 +117,7 @@ class ReceiptAnalysisOrchestrator:
                 evidence_status=policy.evidence_status,
                 need_check=policy.need_check,
                 reason=policy.reason,
+                document_type=input_data.document_type,
             )
 
         extracted = ExtractedData(
@@ -144,4 +147,5 @@ class ReceiptAnalysisOrchestrator:
             policy=policy_data,
             saved=saved,
             model=model_str,
+            document_type=input_data.document_type,
         )

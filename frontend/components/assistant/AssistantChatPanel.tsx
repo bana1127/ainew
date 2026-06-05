@@ -29,6 +29,7 @@ export function AssistantChatPanel({ context, onClose }: AssistantChatPanelProps
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [lastActivityId, setLastActivityId] = useState<string | null>(context.activity_id ?? null);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "hello",
@@ -66,7 +67,16 @@ export function AssistantChatPanel({ context, onClose }: AssistantChatPanelProps
       { id: makeId(), role: "user", text: trimmed },
     ]);
     try {
-      const response = await sendAssistantChat({ message: trimmed, context });
+      const response = await sendAssistantChat({
+        message: trimmed,
+        context: {
+          ...context,
+          last_activity_id: lastActivityId ?? context.activity_id ?? null,
+        },
+      });
+      const activityLink = response.links.find((link) => link.url.match(/^\/activities\/([^/?#]+)/));
+      const activityId = activityLink?.url.match(/^\/activities\/([^/?#]+)/)?.[1];
+      if (activityId) setLastActivityId(decodeURIComponent(activityId));
       setMessages((prev) => [
         ...prev,
         {

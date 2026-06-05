@@ -6,28 +6,39 @@ from uuid import UUID
 
 
 ASSISTANT_SUGGESTIONS = [
-    "총 부원 몇 명이야?",
     "활동 몇 개 있어?",
-    "이번 학기 회비 미납 몇 명이야?",
+    "각각 어떤 활동이었어?",
+    "이번 주 일정 뭐 있어?",
     "활동비 미납 있는 활동 알려줘",
+    "회비 미납 몇 명이야?",
     "증빙 빠진 활동 있어?",
-    "이번 학기 총 수입 얼마야?",
+    "이번 달 수입 지출 알려줘",
 ]
 
 QUERY_INTENTS = {
     "member_count",
     "activity_count",
+    "activity_overview",
+    "activity_detail_insight",
     "activity_participant_count",
     "membership_fee_status",
+    "membership_fee_insight",
     "activity_fee_status",
+    "activity_fee_insight",
+    "calendar_schedule",
     "budget_summary",
+    "budget_insight",
     "cashflow_summary",
     "activity_settlement_status",
+    "transaction_review",
     "evidence_missing",
+    "evidence_summary",
     "report_missing",
+    "report_summary",
     "audit_readiness",
     "document_summary",
     "receipt_summary",
+    "ambiguous_activity",
     "unknown",
 }
 
@@ -82,26 +93,36 @@ def route_floating_assistant_intent(
         return "unknown"
     if is_mutation_request(text):
         return "unknown"
+    if any(word in text for word in ["이번 주", "이번주", "이번 달 일정", "이번달 일정", "일정", "캘린더"]):
+        return "calendar_schedule"
+    if any(word in text for word in ["수입", "지출", "잔액", "예산", "순증감"]):
+        return "budget_insight"
+    if "거래" in text and any(word in text for word in ["확인", "검토", "리뷰", "미분류"]):
+        return "transaction_review"
     if any(word in text for word in ["증빙", "증거", "영수증 누락"]) and any(
         word in text for word in ["빠진", "누락", "없는", "없어", "미연결"]
     ):
-        return "evidence_missing"
+        return "evidence_summary"
     if "보고서" in text and any(word in text for word in ["빠진", "누락", "없는", "없어", "미작성"]):
-        return "report_missing"
+        return "report_summary"
     if "감사" in text or "감사자료" in text:
         return "audit_readiness"
     if "활동비" in text and any(word in text for word in ["미납", "납부", "받을", "정산"]):
-        return "activity_fee_status"
+        return "activity_fee_insight"
+    if context and (context.get("last_activity_id") or context.get("activity_id")) and any(word in text for word in ["그 활동", "활동비는", "참여자는", "증빙은", "보고서는"]):
+        if "활동비" in text:
+            return "activity_fee_insight"
+        return "activity_detail_insight"
     if "회비" in text and any(word in text for word in ["미납", "납부", "완납", "받을"]):
-        return "membership_fee_status"
+        return "membership_fee_insight"
     if any(word in text for word in ["참여자", "참가자", "참여했", "참석자"]):
-        return "activity_participant_count"
-    if "활동" in text and any(word in text for word in ["몇 개", "몇개", "총", "개 있어"]):
-        return "activity_count"
+        return "activity_detail_insight"
+    if "활동" in text and any(word in text for word in ["몇 개", "몇개", "총", "개 있어", "어떤", "각각", "정리", "목록"]):
+        return "activity_overview"
     if any(word in text for word in ["흐름", "cashflow", "입출금", "입금", "출금"]):
         return "cashflow_summary"
     if any(word in text for word in ["예산", "잔액", "총 수입", "총수입", "총 지출", "총지출", "순증감"]):
-        return "budget_summary"
+        return "budget_insight"
     if "정산" in text:
         return "activity_settlement_status"
     if "영수증" in text:
@@ -113,7 +134,7 @@ def route_floating_assistant_intent(
     ):
         return "member_count"
     if context and context.get("page") == "activity_detail" and any(word in text for word in ["몇 명", "몇명"]):
-        return "activity_participant_count"
+        return "activity_detail_insight"
     return "unknown"
 
 
@@ -342,6 +363,170 @@ def get_missing_evidence_activities(db: Any) -> list[dict[str, Any]]:
 def _chat_for_intent(db: Any, intent: str, message: str, context: dict[str, Any] | None) -> dict[str, Any]:
     context = context or {}
     period = context.get("period") or current_period()
+    last_activity_id = context.get("last_activity_id") or context.get("activity_id")
+
+    if intent == "activity_overview":
+        from app.services.assistant_activity_insight_service import get_activity_overview
+
+        overview = get_activity_overview(db, period="month" if "이번" in normalize_message(message) else None)
+        preview = overview["items"][:5]
+        lines = [
+            f"{item['title']}({item['activity_date'] or '일자 없음'}, 참가자 {item['participant_count']}명)"
+            for item in preview
+        ]
+        answer = f"활동은 총 {overview['total_count']}개입니다."
+        if lines:
+            answer += " " + " / ".join(lines)
+        return build_chat_response(
+            answer=answer,
+            intent=intent,
+            data_sources=["activity_reports", "activity_participants", "payment_records", "receipts"],
+            links=[{"label": item["title"], "url": item["target_url"]} for item in preview] or [{"label": "활동 목록", "url": "/activities"}],
+        )
+
+    if intent == "activity_detail_insight":
+        from app.services.assistant_activity_insight_service import (
+            find_activity_candidates,
+            get_activity_detail_insight,
+        )
+
+        activity_id = None
+        if last_activity_id:
+            activity_id = UUID(str(last_activity_id))
+        else:
+            candidates = find_activity_candidates(db, message)
+            if len(candidates) > 1:
+                return build_chat_response(
+                    answer=f"비슷한 활동이 {len(candidates)}개 있습니다. 어떤 활동을 기준으로 확인할까요?",
+                    intent="ambiguous_activity",
+                    data_sources=["activity_reports"],
+                    links=[{"label": item["title"], "url": item["target_url"]} for item in candidates],
+                    confidence=0.72,
+                )
+            if candidates:
+                activity_id = UUID(str(candidates[0]["activity_id"]))
+        if not activity_id:
+            return build_chat_response(
+                answer="어떤 활동을 기준으로 볼지 활동명을 조금 더 알려주세요.",
+                intent=intent,
+                data_sources=["activity_reports"],
+                links=[{"label": "활동 목록", "url": "/activities"}],
+                confidence=0.65,
+            )
+        insight = get_activity_detail_insight(db, activity_id)
+        return build_chat_response(
+            answer=(
+                f"{insight['title']}은 {insight['activity_date'] or '일자 없음'}"
+                f"{' ' + insight['location'] if insight.get('location') else ''}에서 진행된 활동입니다. "
+                f"참가자 {insight['participant_count']}명, 활동비 예정 {_money(insight['fee_required'])}, "
+                f"납부 {_money(insight['fee_paid'])}, 미납 {insight['unpaid_count']}명입니다. "
+                f"보고서 {insight['report_status']}, 증빙 {insight['evidence_status']} 상태입니다."
+            ),
+            intent=intent,
+            data_sources=["activity_reports", "activity_participants", "payment_records", "receipts"],
+            links=[
+                {"label": "활동 상세", "url": insight["target_url"]},
+                {"label": "활동비 탭", "url": link_for("activity_fee", insight["activity_id"])},
+                {"label": "증빙 탭", "url": link_for("evidence", insight["activity_id"])},
+            ],
+        )
+
+    if intent == "activity_fee_insight":
+        from app.services.assistant_activity_insight_service import find_activity_candidates, get_activity_fee_insight
+
+        activity_id = UUID(str(last_activity_id)) if last_activity_id else None
+        if activity_id is None and not any(word in normalize_message(message) for word in ["미납", "전체", "있는 활동"]):
+            candidates = find_activity_candidates(db, message)
+            if len(candidates) > 1:
+                return build_chat_response(
+                    answer=f"비슷한 활동이 {len(candidates)}개 있습니다. 어떤 활동의 활동비를 볼까요?",
+                    intent="ambiguous_activity",
+                    data_sources=["activity_reports"],
+                    links=[{"label": item["title"], "url": item["target_url"]} for item in candidates],
+                    confidence=0.72,
+                )
+            if candidates:
+                activity_id = UUID(str(candidates[0]["activity_id"]))
+        insight = get_activity_fee_insight(db, activity_id=activity_id, period=None if activity_id else period)
+        links = [{"label": row["activity_title"], "url": row["target_url"]} for row in insight["activities"][:5]]
+        if activity_id:
+            title = insight["activities"][0]["activity_title"] if insight["activities"] else "해당 활동"
+            answer = f"{title} 활동비는 미납/확인필요 {insight['unpaid_count']}건, 받을 금액 {_money(insight['due_amount'])}입니다."
+        else:
+            answer = f"활동비 미납/확인필요 기록은 {insight['unpaid_count']}건이고, 받을 금액은 {_money(insight['due_amount'])}입니다."
+        return build_chat_response(
+            answer=answer,
+            intent=intent,
+            data_sources=["payment_records", "activity_reports"],
+            links=links or [{"label": "활동 목록", "url": "/activities"}],
+        )
+
+    if intent == "membership_fee_insight":
+        from app.services.assistant_activity_insight_service import get_membership_fee_insight
+
+        insight = get_membership_fee_insight(db, period=period)
+        return build_chat_response(
+            answer=f"회비 미납/부분납/확인필요 인원은 {insight['unpaid_count']}명이고, 받을 금액은 {_money(insight['due_amount'])}입니다.",
+            intent=intent,
+            data_sources=["payment_records", "members"],
+            links=[{"label": "회비 화면", "url": link_for("membership_fee")}],
+        )
+
+    if intent == "calendar_schedule":
+        from app.services.assistant_activity_insight_service import get_calendar_schedule_summary
+
+        period_key = "week" if any(word in normalize_message(message) for word in ["이번 주", "이번주"]) else "month"
+        summary = get_calendar_schedule_summary(db, period=period_key)
+        sample = " / ".join(f"[{item['event_type']}] {item['title']}({item['date']})" for item in summary["items"][:6])
+        return build_chat_response(
+            answer=f"{'이번 주' if period_key == 'week' else '이번 달'} 일정은 {summary['total_count']}건입니다." + (f" {sample}" if sample else ""),
+            intent=intent,
+            data_sources=["activity_reports", "calendar_events"],
+            links=[{"label": "캘린더 보기", "url": "/dashboard"}],
+        )
+
+    if intent == "budget_insight":
+        from app.services.assistant_activity_insight_service import get_budget_insight
+
+        insight = get_budget_insight(db, period=None)
+        return build_chat_response(
+            answer=(
+                f"총 수입은 {_money(insight['total_income'])}, 총 지출은 {_money(insight['total_expense'])}, "
+                f"순증감은 {_money(insight['net_change'])}, 현재 잔액은 {_money(insight['current_balance'])}입니다."
+            ),
+            intent=intent,
+            data_sources=["bank_transactions", "payment_records", "receipts"],
+            links=[{"label": "예산 관리", "url": link_for("budget")}],
+        )
+
+    if intent in {"evidence_summary", "report_summary"}:
+        from app.services.assistant_activity_insight_service import get_document_evidence_summary
+
+        activity_id = UUID(str(last_activity_id)) if last_activity_id else None
+        summary = get_document_evidence_summary(db, activity_id=activity_id)
+        if intent == "evidence_summary":
+            items = [item for item in summary["items"] if item["missing_evidence"]]
+            answer = f"증빙이 빠진 활동은 {len(items)}건입니다."
+            links = [{"label": item["activity_title"], "url": item["evidence_url"]} for item in items[:5]]
+        else:
+            items = [item for item in summary["items"] if item["missing_report"]]
+            answer = f"보고서가 미작성인 활동은 {len(items)}건입니다."
+            links = [{"label": item["activity_title"], "url": item["activity_url"]} for item in items[:5]]
+        return build_chat_response(
+            answer=answer,
+            intent=intent,
+            data_sources=["activity_reports", "receipts"],
+            links=links or [{"label": "활동 목록", "url": "/activities"}],
+        )
+
+    if intent == "transaction_review":
+        return build_chat_response(
+            answer="거래 검토 항목은 거래내역 화면에서 미분류/확인필요 상태로 확인할 수 있습니다.",
+            intent=intent,
+            data_sources=["bank_transactions"],
+            links=[{"label": "거래내역", "url": link_for("transactions")}],
+            confidence=0.7,
+        )
 
     if intent == "member_count":
         summary = get_member_summary(db)

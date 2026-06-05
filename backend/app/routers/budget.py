@@ -32,6 +32,7 @@ from app.services.budget_service import (
     parse_date_filter,
     upsert_budget_plan,
 )
+from app.services.quarter_service import parse_operating_quarter, quarter_date_range_from_str
 
 
 router = APIRouter()
@@ -49,19 +50,37 @@ def budget_summary(
     period: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    operating_quarter: str | None = Query(default=None, description="운영 분기 (예: 2026-Q2)"),
     db: Session = Depends(get_db),
 ) -> dict:
     start, end = _dates(start_date, end_date)
-    return get_budget_summary(db, period=period, start_date=start, end_date=end)
+    if operating_quarter:
+        try:
+            parse_operating_quarter(operating_quarter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return get_budget_summary(
+        db,
+        period=period,
+        start_date=start,
+        end_date=end,
+        operating_quarter=operating_quarter,
+    )
 
 
 @router.get("/cashflow")
 def budget_cashflow(
     start_date: str | None = None,
     end_date: str | None = None,
+    operating_quarter: str | None = Query(default=None, description="운영 분기 (예: 2026-Q2)"),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     start, end = _dates(start_date, end_date)
+    if operating_quarter:
+        try:
+            start, end = quarter_date_range_from_str(operating_quarter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     return get_budget_cashflow(db, start_date=start, end_date=end)
 
 
@@ -161,9 +180,15 @@ def budget_vs_actual(
     period: str,
     start_date: str | None = None,
     end_date: str | None = None,
+    operating_quarter: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     start, end = _dates(start_date, end_date)
+    if operating_quarter:
+        try:
+            start, end = quarter_date_range_from_str(operating_quarter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     return get_budget_vs_actual(db, period=period, start_date=start, end_date=end)
 
 
@@ -171,9 +196,15 @@ def budget_vs_actual(
 def budget_activity_settlements(
     start_date: str | None = None,
     end_date: str | None = None,
+    operating_quarter: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     start, end = _dates(start_date, end_date)
+    if operating_quarter:
+        try:
+            start, end = quarter_date_range_from_str(operating_quarter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     return get_activity_settlements(db, start_date=start, end_date=end)
 
 
@@ -182,10 +213,34 @@ def budget_review_items(
     period: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    operating_quarter: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     start, end = _dates(start_date, end_date)
+    if operating_quarter:
+        try:
+            start, end = quarter_date_range_from_str(operating_quarter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     return get_review_items(db, period=period, start_date=start, end_date=end)
+
+
+@router.get("/quarter-summary")
+def budget_quarter_summary(
+    operating_quarter: str = Query(..., description="운영 분기 (예: 2026-Q2)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """분기별 예산 요약 (수입/지출/제외 내역 포함)."""
+    try:
+        q_start, q_end = quarter_date_range_from_str(operating_quarter)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return get_budget_summary(
+        db,
+        start_date=q_start,
+        end_date=q_end,
+        operating_quarter=operating_quarter,
+    )
 
 
 @router.post("/review-items/{item_id}/resolve")
@@ -235,3 +290,72 @@ def budget_transaction_classify_confirm_for_transaction(
 ) -> dict:
     # transaction_id is kept for API ergonomics; action_id still drives safe confirmation.
     return budget_transaction_classify_confirm(payload, db)
+
+
+# ── Task 43: Quarter export endpoints ─────────────────────────────────────────
+
+from fastapi.responses import Response, StreamingResponse
+
+
+@router.get("/quarter-export/csv")
+def export_quarter_csv(
+    operating_quarter: str = Query(..., description="운영 분기 (예: 2026-Q2)"),
+    db: Session = Depends(get_db),
+) -> Response:
+    """분기 거래내역 CSV 다운로드."""
+    try:
+        parse_operating_quarter(operating_quarter)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    from app.services.budget_export_service import (
+        get_quarter_transactions,
+        build_transaction_csv,
+        get_quarter_receipts,
+        build_receipt_csv,
+    )
+    import io, zipfile
+
+    txs = get_quarter_transactions(db, operating_quarter)
+    receipts = get_quarter_receipts(db, operating_quarter)
+
+    # Combined CSV
+    tx_csv = build_transaction_csv(txs)
+    receipt_csv = build_receipt_csv(receipts)
+    combined = f"# 거래내역 ({operating_quarter})\n{tx_csv}\n\n# 증빙 목록 ({operating_quarter})\n{receipt_csv}"
+
+    return Response(
+        content=combined.encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8-sig",
+        headers={
+            "Content-Disposition": f"attachment; filename={operating_quarter}_budget.csv",
+        },
+    )
+
+
+@router.get("/quarter-export/zip")
+def export_quarter_zip(
+    operating_quarter: str = Query(..., description="운영 분기 (예: 2026-Q2)"),
+    db: Session = Depends(get_db),
+) -> Response:
+    """분기 증빙 ZIP 다운로드 (거래내역 CSV + 증빙 파일 포함)."""
+    try:
+        parse_operating_quarter(operating_quarter)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    from app.core.config import settings
+    from app.services.budget_export_service import build_quarter_zip
+
+    try:
+        zip_bytes = build_quarter_zip(db, operating_quarter, settings.UPLOAD_DIR)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"ZIP 생성 실패: {exc}")
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename={operating_quarter}_evidence.zip",
+        },
+    )

@@ -7,6 +7,7 @@ from app.models.activity import (
 from app.models.activity_feedback import ActivityFeedback
 from app.models.assistant_action import AssistantActionProposal
 from app.models.budget import BudgetCategory, BudgetPlan
+from app.models.calendar import CalendarEvent
 from app.models.file import UploadedFile
 from app.models.member import Member
 from app.models.notification import Notification
@@ -26,6 +27,7 @@ __all__ = [
     "BankTransaction",
     "BudgetCategory",
     "BudgetPlan",
+    "CalendarEvent",
     "Member",
     "Notification",
     "PaymentAdjustmentLog",

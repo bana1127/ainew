@@ -55,6 +55,7 @@ def _orchestrate(
     save_to_db: bool,
     manual_payment_method: str | None,
     manual_category: str | None,
+    document_type: str = "unknown",
 ) -> ReceiptAnalyzeResponse:
     orchestrator_input = ReceiptOrchestratorInput(
         file_id=file_id,
@@ -65,6 +66,7 @@ def _orchestrate(
         save_to_db=save_to_db,
         manual_payment_method=manual_payment_method,
         manual_category=manual_category,
+        document_type=document_type,
     )
 
     try:
@@ -104,6 +106,7 @@ def _orchestrate(
         ),
         saved=result.saved,
         model=result.model,
+        document_type=result.document_type,
     )
 
 
@@ -114,9 +117,23 @@ def analyze_receipt_upload(
     save_to_db: bool = Form(default=True),
     manual_payment_method: str | None = Form(default=None),
     manual_category: str | None = Form(default=None),
+    document_type: str = Form(default="unknown"),
     db: Session = Depends(get_db),
 ) -> ReceiptAnalyzeResponse:
     uploaded = _save_receipt_file(file, db)
+    # Task 43: Update file metadata with activity_report_id immediately so it
+    # appears in the activity file vault even if orchestration fails later.
+    if activity_report_id:
+        uploaded.activity_report_id = activity_report_id
+        uploaded.file_category = "evidence"
+        uploaded.file_role = "evidence"
+        uploaded.related_entity_type = "activity_report"
+        uploaded.related_entity_id = activity_report_id
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
     full_path = settings.UPLOAD_DIR.parent / uploaded.stored_path
     return _orchestrate(
         db=db,
@@ -128,6 +145,7 @@ def analyze_receipt_upload(
         save_to_db=save_to_db,
         manual_payment_method=manual_payment_method,
         manual_category=manual_category,
+        document_type=document_type,
     )
 
 

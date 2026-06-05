@@ -1,4 +1,5 @@
 from datetime import datetime as dt_type
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,6 +11,7 @@ from app.core.database import get_db
 from app.models import ActivityReport, Receipt
 from app.routers.common import apply_updates, commit_or_400, get_or_404
 from app.schemas import ReceiptCreate, ReceiptRead, ReceiptUpdate
+from app.services.quarter_service import quarter_date_range_from_str
 
 
 router = APIRouter()
@@ -24,8 +26,10 @@ def list_receipts(
     need_check: bool | None = None,
     payment_method: str | None = None,
     category: str | None = None,
+    document_type: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    operating_quarter: str | None = Query(default=None, description="운영 분기 (예: 2026-Q2)"),
     q: str | None = None,
     db: Session = Depends(get_db),
 ) -> list[Receipt]:
@@ -40,10 +44,20 @@ def list_receipts(
         statement = statement.where(Receipt.payment_method == payment_method)
     if category:
         statement = statement.where(Receipt.category == category)
-    if start_date:
-        statement = statement.where(Receipt.receipt_date >= dt_type.fromisoformat(start_date).date())
-    if end_date:
-        statement = statement.where(Receipt.receipt_date <= dt_type.fromisoformat(end_date).date())
+    if document_type:
+        statement = statement.where(Receipt.document_type == document_type)
+    if operating_quarter:
+        try:
+            q_start, q_end = quarter_date_range_from_str(operating_quarter)
+            statement = statement.where(Receipt.receipt_date >= q_start)
+            statement = statement.where(Receipt.receipt_date <= q_end)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    else:
+        if start_date:
+            statement = statement.where(Receipt.receipt_date >= dt_type.fromisoformat(start_date).date())
+        if end_date:
+            statement = statement.where(Receipt.receipt_date <= dt_type.fromisoformat(end_date).date())
     if q:
         like = f"%{q}%"
         statement = statement.where(
@@ -133,6 +147,61 @@ def link_receipt_to_activity(
                 uploaded_file.related_entity_id = None
 
     commit_or_400(db, "Could not update receipt activity link")
+    db.refresh(receipt)
+    return receipt
+
+
+# ── Task 43: Manual data edit endpoint ───────────────────────────────────────
+
+class ReceiptManualDataPayload(BaseModel):
+    manual_data: dict[str, Any]
+    document_type: str | None = None
+    title: str | None = None
+    amount: int | None = None
+    receipt_date: str | None = None
+
+
+@router.patch("/{receipt_id}/manual-edit", response_model=ReceiptRead)
+def manual_edit_receipt(
+    receipt_id: UUID,
+    payload: ReceiptManualDataPayload,
+    db: Session = Depends(get_db),
+) -> Receipt:
+    """사용자가 증빙의 parsed_data를 수정 → manual_data에 저장.
+
+    화면에는 manual_data가 있으면 우선 표시됩니다.
+    """
+    from datetime import date as date_type
+
+    receipt = get_or_404(db, Receipt, receipt_id, "Receipt")
+    receipt.manual_data = payload.manual_data
+    if payload.document_type is not None:
+        receipt.document_type = payload.document_type
+    if payload.title is not None:
+        receipt.title = payload.title
+    if payload.amount is not None:
+        receipt.amount = payload.amount
+    if payload.receipt_date is not None:
+        try:
+            receipt.receipt_date = date_type.fromisoformat(payload.receipt_date)
+        except ValueError:
+            pass
+    commit_or_400(db, "Could not save manual edit")
+    db.refresh(receipt)
+    return receipt
+
+
+@router.post("/manual", response_model=ReceiptRead)
+def create_manual_receipt(
+    payload: ReceiptCreate,
+    db: Session = Depends(get_db),
+) -> Receipt:
+    """파일 없이 수동 증빙 추가."""
+    receipt = Receipt(**payload.model_dump())
+    if not receipt.document_type:
+        receipt.document_type = "other"
+    db.add(receipt)
+    commit_or_400(db, "Could not create manual receipt")
     db.refresh(receipt)
     return receipt
 

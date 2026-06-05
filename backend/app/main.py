@@ -11,6 +11,7 @@ from app.routers import (
     assistant,
     automations,
     budget,
+    calendar,
     dashboard,
     document_templates,
     files,
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
+    app.include_router(calendar.router, prefix="/api/calendar", tags=["calendar"])
     app.include_router(budget.router, prefix="/api/budget", tags=["budget"])
     app.include_router(activities.router, prefix="/api/activities", tags=["activities"])
     app.include_router(

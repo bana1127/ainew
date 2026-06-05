@@ -35,6 +35,20 @@ from app.schemas.assistant import AssistantExecuteResponse
 
 logger = logging.getLogger(__name__)
 
+INACTIVE_PARTICIPANT_STATUSES = {"removed", "cancelled", "excluded", "deleted", "inactive"}
+INACTIVE_ACTIVITY_FEE_STATUSES = {"cancelled", "excluded"}
+
+
+def _active_participant_condition(ActivityParticipant, activity_id: UUID):
+    return and_(
+        ActivityParticipant.activity_report_id == activity_id,
+        (
+            ActivityParticipant.status.is_(None)
+            | ActivityParticipant.status.notin_(INACTIVE_PARTICIPANT_STATUSES)
+        ),
+    )
+
+
 # detail_url mapping by result_type
 DETAIL_URLS: dict[str, str] = {
     "receipt_analysis": "/receipts",
@@ -1182,7 +1196,7 @@ class AssistantOrchestrator:
 
         # Get participants
         participants = list(self.db.scalars(
-            select(ActivityParticipant).where(ActivityParticipant.activity_report_id == activity_uuid)
+            select(ActivityParticipant).where(_active_participant_condition(ActivityParticipant, activity_uuid))
         ))
         if not participants:
             return AssistantExecuteResponse(
@@ -2137,20 +2151,37 @@ def _korean_small_number(raw: str) -> int:
     return values.get(raw, 1)
 
 
+def _payment_status_from_amount(paid: int, required: int) -> str:
+    paid = max(0, int(paid or 0))
+    required = max(0, int(required or 0))
+    if required == 0:
+        return "exempt"
+    if paid == 0:
+        return "unpaid"
+    if paid < required:
+        return "partial"
+    if paid == required:
+        return "paid"
+    return "overpaid"
+
+
 def _create_activity_fee_records(db: Session, activity_id: UUID, amount: int) -> dict:
     from app.models.activity import ActivityParticipant
     from app.models.payment import PaymentRecord
 
     participants = list(
         db.scalars(
-            select(ActivityParticipant).where(ActivityParticipant.activity_report_id == activity_id)
+            select(ActivityParticipant).where(_active_participant_condition(ActivityParticipant, activity_id))
         )
     )
     period_key = f"act-{str(activity_id)[:8]}"
     created = 0
     updated = 0
+    active_member_ids = {p.member_id for p in participants if p.member_id}
 
     for participant in participants:
+        if not participant.member_id:
+            continue
         existing = db.scalar(
             select(PaymentRecord).where(
                 and_(
@@ -2161,9 +2192,13 @@ def _create_activity_fee_records(db: Session, activity_id: UUID, amount: int) ->
             )
         )
         if existing:
-            if existing.status not in ("paid", "partial", "exempt", "refunded"):
-                existing.required_amount = amount
-                updated += 1
+            existing.required_amount = amount
+            existing.activity_report_id = activity_id
+            if existing.status in INACTIVE_ACTIVITY_FEE_STATUSES:
+                existing.refund_status = None
+            if existing.status not in ("exempt", "need_check"):
+                existing.status = _payment_status_from_amount(existing.paid_amount, amount)
+            updated += 1
             continue
 
         db.add(
@@ -2179,11 +2214,30 @@ def _create_activity_fee_records(db: Session, activity_id: UUID, amount: int) ->
         )
         created += 1
 
+    cancelled = 0
+    stale_records = list(db.scalars(
+        select(PaymentRecord).where(
+            and_(
+                PaymentRecord.period == period_key,
+                PaymentRecord.payment_type == "activity_fee",
+                PaymentRecord.activity_report_id == activity_id,
+            )
+        )
+    ))
+    for record in stale_records:
+        if record.member_id in active_member_ids or record.status in INACTIVE_ACTIVITY_FEE_STATUSES:
+            continue
+        record.status = "cancelled"
+        if (record.paid_amount or 0) > 0:
+            record.refund_status = "refund_required"
+        cancelled += 1
+
     db.flush()
     return {
         "amount": amount,
         "created_count": created,
         "updated_count": updated,
+        "cancelled_count": cancelled,
         "total_participants": len(participants),
         "payment_type": "activity_fee",
         "period_key": period_key,

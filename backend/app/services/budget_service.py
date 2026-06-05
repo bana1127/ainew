@@ -6,8 +6,14 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
+
+from app.services.quarter_service import (
+    get_operating_quarter,
+    parse_operating_quarter,
+    quarter_date_range_from_str,
+)
 
 
 DEFAULT_BUDGET_CATEGORIES: list[tuple[str, str, int]] = [
@@ -23,6 +29,9 @@ DEFAULT_BUDGET_CATEGORIES: list[tuple[str, str, int]] = [
     ("환불", "expense", 60),
     ("기타 지출", "expense", 90),
 ]
+
+INACTIVE_PARTICIPANT_STATUSES = {"removed", "cancelled", "excluded", "deleted", "inactive"}
+INACTIVE_ACTIVITY_FEE_STATUSES = {"cancelled", "excluded"}
 
 
 def _val(obj: Any, name: str, default: Any = None) -> Any:
@@ -66,6 +75,14 @@ def _period_matches(record: Any, period: str | None) -> bool:
     return period is None or str(_val(record, "period", "")) == period
 
 
+def _is_active_participant(participant: Any) -> bool:
+    return str(_val(participant, "status", "") or "active") not in INACTIVE_PARTICIPANT_STATUSES
+
+
+def _is_active_activity_fee_record(record: Any) -> bool:
+    return str(_val(record, "status", "") or "") not in INACTIVE_ACTIVITY_FEE_STATUSES
+
+
 def parse_date_filter(value: str | None) -> date | None:
     if not value:
         return None
@@ -88,6 +105,23 @@ def evidence_target_url(activity_id: Any | None) -> str:
     return "/transactions"
 
 
+def _is_budget_excluded(transaction: Any) -> bool:
+    """Return True if transaction is excluded from all budget aggregation."""
+    return bool(_val(transaction, "exclude_from_budget", False))
+
+
+def _is_income_excluded(transaction: Any) -> bool:
+    return bool(_val(transaction, "exclude_from_budget", False)) or bool(
+        _val(transaction, "exclude_from_income", False)
+    )
+
+
+def _is_expense_excluded(transaction: Any) -> bool:
+    return bool(_val(transaction, "exclude_from_budget", False)) or bool(
+        _val(transaction, "exclude_from_expense", False)
+    )
+
+
 def compute_finance_summary(
     transactions: list[Any],
     payment_records: list[Any],
@@ -96,14 +130,62 @@ def compute_finance_summary(
     period: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
+    operating_quarter: str | None = None,
 ) -> dict[str, Any]:
+    # Apply operating_quarter as date range override
+    if operating_quarter:
+        q_start, q_end = quarter_date_range_from_str(operating_quarter)
+        start_date = q_start
+        end_date = q_end
+
     txs = [
         t for t in transactions
         if _in_range(_val(t, "transaction_datetime"), start_date, end_date)
     ]
     records = [r for r in payment_records if _period_matches(r, period)]
-    total_income = sum(_to_int(_val(t, "deposit_amount")) for t in txs)
-    total_expense = sum(_to_int(_val(t, "withdraw_amount")) for t in txs)
+
+    # Income: deposit transactions not excluded from income
+    income_txs = [t for t in txs if not _is_income_excluded(t)]
+    # Expense: withdraw transactions not excluded from expense
+    expense_txs = [t for t in txs if not _is_expense_excluded(t)]
+
+    total_income = sum(_to_int(_val(t, "deposit_amount")) for t in income_txs)
+    total_expense = sum(_to_int(_val(t, "withdraw_amount")) for t in expense_txs)
+
+    # Membership fee income (deposit transactions with payment_type=membership_fee)
+    membership_fee_income = sum(
+        _to_int(_val(t, "deposit_amount"))
+        for t in income_txs
+        if str(_val(t, "payment_type", "") or "") == "membership_fee"
+    )
+    # Activity fee income
+    activity_fee_income = sum(
+        _to_int(_val(t, "deposit_amount"))
+        for t in income_txs
+        if str(_val(t, "payment_type", "") or "") == "activity_fee"
+    )
+    # Other income
+    other_income = total_income - membership_fee_income - activity_fee_income
+
+    # Excluded transaction counts
+    excluded_income_count = sum(
+        1 for t in txs
+        if _is_income_excluded(t) and _to_int(_val(t, "deposit_amount")) > 0
+    )
+    excluded_expense_count = sum(
+        1 for t in txs
+        if _is_expense_excluded(t) and _to_int(_val(t, "withdraw_amount")) > 0
+    )
+    excluded_income_amount = sum(
+        _to_int(_val(t, "deposit_amount"))
+        for t in txs
+        if _is_income_excluded(t) and _to_int(_val(t, "deposit_amount")) > 0
+    )
+    excluded_expense_amount = sum(
+        _to_int(_val(t, "withdraw_amount"))
+        for t in txs
+        if _is_expense_excluded(t) and _to_int(_val(t, "withdraw_amount")) > 0
+    )
 
     balance_candidates = [
         t for t in txs
@@ -136,6 +218,7 @@ def compute_finance_summary(
             str(_val(t, "match_status", "")) in {"unmatched", "need_check", "amount_mismatch", "duplicate_candidate"}
             or not _val(t, "payment_type")
         )
+        and not _is_budget_excluded(t)
     ]
     missing_evidence_count = len([
         t for t in txs
@@ -143,11 +226,29 @@ def compute_finance_summary(
         and not _val(t, "linked_activity_id")
         and str(_val(t, "payment_type", "")) not in {"refund", "transfer"}
         and str(_val(t, "review_status", "open")) != "resolved"
+        and not _is_expense_excluded(t)
     ]) + len([
         r for r in receipts
         if str(_val(r, "evidence_status", "")) in {"missing", "pending", "need_check"}
         or _val(r, "file_id") is None
     ])
+
+    # Receipt evidence breakdown
+    receipts_in_range = [
+        r for r in receipts
+        if _in_range(_val(r, "receipt_date"), start_date, end_date)
+    ]
+    evidence_linked_expense = sum(
+        _to_int(_val(r, "amount")) for r in receipts_in_range
+        if _val(r, "activity_report_id") is not None
+        and str(_val(r, "evidence_status", "")) not in {"missing", "pending"}
+    )
+    evidence_missing_expense = sum(
+        _to_int(_val(t, "withdraw_amount")) for t in expense_txs
+        if not _val(t, "linked_activity_id")
+        and str(_val(t, "payment_type", "")) not in {"refund", "transfer"}
+        and str(_val(t, "review_status", "open")) != "resolved"
+    )
 
     return {
         "current_balance": current_balance,
@@ -159,8 +260,19 @@ def compute_finance_summary(
         "review_transaction_count": len(review_transactions),
         "missing_evidence_count": missing_evidence_count,
         "period": period,
+        "operating_quarter": operating_quarter,
         "start_date": start_date.isoformat() if start_date else None,
         "end_date": end_date.isoformat() if end_date else None,
+        # Extended quarter summary fields
+        "membership_fee_income": membership_fee_income,
+        "activity_fee_income": activity_fee_income,
+        "other_income": other_income,
+        "evidence_linked_expense": evidence_linked_expense,
+        "evidence_missing_expense": evidence_missing_expense,
+        "excluded_income_count": excluded_income_count,
+        "excluded_expense_count": excluded_expense_count,
+        "excluded_income_amount": excluded_income_amount,
+        "excluded_expense_amount": excluded_expense_amount,
     }
 
 
@@ -285,12 +397,16 @@ def compute_activity_settlements(
 ) -> list[dict[str, Any]]:
     participant_count: dict[str, int] = defaultdict(int)
     for p in participants:
+        if not _is_active_participant(p):
+            continue
         participant_count[str(_val(p, "activity_report_id"))] += 1
 
     fee_required: dict[str, int] = defaultdict(int)
     fee_paid: dict[str, int] = defaultdict(int)
     for r in payment_records:
         if str(_val(r, "payment_type", "")) != "activity_fee":
+            continue
+        if not _is_active_activity_fee_record(r):
             continue
         activity_id = _val(r, "activity_report_id")
         if activity_id:
@@ -390,11 +506,18 @@ def get_budget_summary(
     period: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
+    operating_quarter: str | None = None,
 ) -> dict[str, Any]:
     from app.models import PaymentRecord
     from app.services.membership_fee_policy import preview_membership_fee_generation
 
-    transactions = list(db.scalars(_transaction_stmt(start_date, end_date)))
+    # Apply operating_quarter date override for transactions
+    eff_start = start_date
+    eff_end = end_date
+    if operating_quarter:
+        eff_start, eff_end = quarter_date_range_from_str(operating_quarter)
+
+    transactions = list(db.scalars(_transaction_stmt(eff_start, eff_end)))
     if period:
         membership_preview = preview_membership_fee_generation(db=db, period=period)
         membership_records = [
@@ -422,14 +545,15 @@ def get_budget_summary(
         payment_records = [*membership_records, *activity_records]
     else:
         payment_records = list(db.scalars(select(PaymentRecord)))
-    receipts = list(db.scalars(_receipt_stmt(start_date, end_date)))
+    receipts = list(db.scalars(_receipt_stmt(eff_start, eff_end)))
     return compute_finance_summary(
         transactions,
         payment_records,
         receipts,
         period=period,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=eff_start,
+        end_date=eff_end,
+        operating_quarter=operating_quarter,
     )
 
 
@@ -478,9 +602,17 @@ def get_activity_settlements(
     from app.models import ActivityParticipant, ActivityReport, BankTransaction, PaymentRecord, Receipt
 
     activities = list(db.scalars(select(ActivityReport).where(ActivityReport.deleted_at.is_(None))))
-    participants = list(db.scalars(select(ActivityParticipant)))
+    participants = list(db.scalars(select(ActivityParticipant).where(
+        or_(
+            ActivityParticipant.status.is_(None),
+            ActivityParticipant.status.notin_(INACTIVE_PARTICIPANT_STATUSES),
+        )
+    )))
     payment_records = list(db.scalars(select(PaymentRecord).where(
-        and_(PaymentRecord.payment_type == "activity_fee", PaymentRecord.status != "cancelled")
+        and_(
+            PaymentRecord.payment_type == "activity_fee",
+            PaymentRecord.status.notin_(INACTIVE_ACTIVITY_FEE_STATUSES),
+        )
     )))
     receipts = list(db.scalars(select(Receipt)))
     transactions = list(db.scalars(select(BankTransaction).where(BankTransaction.linked_activity_id.is_not(None))))

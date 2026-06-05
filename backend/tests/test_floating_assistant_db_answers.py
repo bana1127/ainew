@@ -18,8 +18,7 @@ def test_member_count_answer_uses_member_summary(monkeypatch):
 
 def test_membership_fee_answer_uses_payment_records(monkeypatch):
     monkeypatch.setattr(
-        svc,
-        "get_membership_fee_summary",
+        "app.services.assistant_activity_insight_service.get_membership_fee_insight",
         lambda db, period=None: {
             "period": period,
             "total_count": 8,
@@ -34,7 +33,7 @@ def test_membership_fee_answer_uses_payment_records(monkeypatch):
         context={"period": "2026-1"},
     )
 
-    assert response["intent"] == "membership_fee_status"
+    assert response["intent"] == "membership_fee_insight"
     assert "3명" in response["answer"]
     assert "90,000원" in response["answer"]
     assert response["links"][0]["url"] == "/payments"
@@ -42,10 +41,9 @@ def test_membership_fee_answer_uses_payment_records(monkeypatch):
 
 def test_activity_fee_answer_returns_activity_links(monkeypatch):
     monkeypatch.setattr(
-        svc,
-        "get_activity_fee_summary",
-        lambda db, period=None: {
-            "period": period,
+        "app.services.assistant_activity_insight_service.get_activity_fee_insight",
+        lambda db, activity_id=None, period=None: {
+            "activity_id": activity_id,
             "unpaid_count": 2,
             "due_amount": 40000,
             "activities": [
@@ -66,5 +64,5 @@ def test_activity_fee_answer_returns_activity_links(monkeypatch):
         context={"period": "2026-1"},
     )
 
-    assert response["intent"] == "activity_fee_status"
+    assert response["intent"] == "activity_fee_insight"
     assert response["links"][0]["url"] == "/activities/activity-1?tab=activity-fee"

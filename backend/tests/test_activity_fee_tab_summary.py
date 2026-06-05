@@ -23,17 +23,18 @@ for _m in ("psycopg", "psycopg2", "psycopg2.extras"):
 
 def _compute_summary(records: list[dict]) -> dict:
     """Mirrors the summary logic in get_activity_fee_summary."""
-    paid = sum(1 for r in records if r["status"] == "paid")
-    unpaid = sum(1 for r in records if r["status"] == "unpaid")
-    partial = sum(1 for r in records if r["status"] == "partial")
-    overpaid = sum(1 for r in records if r["status"] == "overpaid")
+    active_records = [r for r in records if r["status"] not in {"cancelled", "excluded"}]
+    paid = sum(1 for r in active_records if r["status"] == "paid")
+    unpaid = sum(1 for r in active_records if r["status"] == "unpaid")
+    partial = sum(1 for r in active_records if r["status"] == "partial")
+    overpaid = sum(1 for r in active_records if r["status"] == "overpaid")
     refund_needed = sum(
-        1 for r in records if r.get("refund_status") in ("refund_required", "refund_pending")
+        1 for r in active_records if r.get("refund_status") in ("refund_required", "refund_pending")
     )
-    total_required = sum(r["required_amount"] for r in records)
-    total_paid = sum(r["paid_amount"] for r in records)
+    total_required = sum(r["required_amount"] for r in active_records)
+    total_paid = sum(r["paid_amount"] for r in active_records)
     return {
-        "participant_count": len(records),
+        "participant_count": len(active_records),
         "paid": paid,
         "unpaid": unpaid,
         "partial": partial,
@@ -114,6 +115,19 @@ class TestActivityFeeSummaryAggregation:
         ]
         summary = _compute_summary(records)
         assert summary["refund_needed"] == 2
+
+    def test_cancelled_and_excluded_records_not_counted(self) -> None:
+        records = [
+            {"status": "paid", "required_amount": 10000, "paid_amount": 10000},
+            {"status": "cancelled", "required_amount": 10000, "paid_amount": 0},
+            {"status": "excluded", "required_amount": 10000, "paid_amount": 0},
+        ]
+
+        summary = _compute_summary(records)
+
+        assert summary["participant_count"] == 1
+        assert summary["total_required"] == 10000
+        assert summary["paid"] == 1
 
     def test_empty_records(self) -> None:
         summary = _compute_summary([])

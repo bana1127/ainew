@@ -20,6 +20,9 @@ from uuid import UUID
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
+INACTIVE_PARTICIPANT_STATUSES = {"removed", "cancelled", "excluded", "deleted", "inactive"}
+INACTIVE_ACTIVITY_FEE_STATUSES = {"cancelled", "excluded"}
+
 
 @dataclass
 class AuditCheckItem:
@@ -75,7 +78,15 @@ def compute_audit_checklist(db: Session, activity_id: UUID) -> ActivityAuditChec
 
     # 2. Participants
     participants = list(db.scalars(
-        select(ActivityParticipant).where(ActivityParticipant.activity_report_id == activity_id)
+        select(ActivityParticipant).where(
+            and_(
+                ActivityParticipant.activity_report_id == activity_id,
+                (
+                    ActivityParticipant.status.is_(None)
+                    | ActivityParticipant.status.notin_(INACTIVE_PARTICIPANT_STATUSES)
+                ),
+            )
+        )
     ))
     items.append(AuditCheckItem(
         key="participants",
@@ -141,7 +152,8 @@ def compute_audit_checklist(db: Session, activity_id: UUID) -> ActivityAuditChec
             and_(
                 PaymentRecord.period == period_key,
                 PaymentRecord.payment_type == "activity_fee",
-                PaymentRecord.status != "cancelled",
+                PaymentRecord.status.notin_(INACTIVE_ACTIVITY_FEE_STATUSES),
+                PaymentRecord.member_id.in_([p.member_id for p in participants if p.member_id]),
             )
         )
     ))
