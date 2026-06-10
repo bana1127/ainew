@@ -66,18 +66,32 @@ class PublisherAgent:
         from app.models.file import UploadedFile
         from app.services.evidence_parser_service import (
             detect_document_type_from_text,
+            looks_like_activity_photo,
             policy_for_document_type,
         )
 
         # Auto-detect document_type from raw_text if still unknown
         raw_text = extracted.get("raw_text") or ""
+        uploaded_file = self.db.get(UploadedFile, file_id) if file_id else None
+        extracted_document_type = extracted.get("document_type")
+        amount_val = int(extracted.get("amount", 0) or 0)
         if document_type in ("unknown", "auto", None):
-            detected = detect_document_type_from_text(raw_text)
+            if extracted_document_type and extracted_document_type not in ("unknown", "auto"):
+                detected = extracted_document_type
+            else:
+                detected = detect_document_type_from_text(raw_text)
+            if detected == "unknown" and looks_like_activity_photo(
+                raw_text=raw_text,
+                file_name=uploaded_file.original_filename if uploaded_file else None,
+                mime_type=uploaded_file.mime_type if uploaded_file else None,
+                amount=amount_val,
+                extracted_document_type=extracted_document_type,
+            ):
+                detected = "activity_photo"
             document_type = detected if detected != "unknown" else document_type
 
-        # Override policy for non-receipt document types (business_registration, bankbook_copy)
-        amount_val = int(extracted.get("amount", 0))
-        if document_type in ("business_registration", "bankbook_copy"):
+        # Override policy for document types that do not use receipt payment rules.
+        if document_type in ("business_registration", "bankbook_copy", "activity_photo"):
             evidence_status, need_check, reason = policy_for_document_type(document_type, amount_val)
         elif document_type == "unknown" and evidence_status == "need_check" and amount_val <= 0:
             # Still unknown, but no amount: keep as pending rather than need_check for unknown docs
@@ -105,7 +119,7 @@ class PublisherAgent:
             activity_report_id=activity_report_id,
             receipt_date=receipt_date,
             store_name=extracted.get("store_name"),
-            amount=int(extracted.get("amount", 0)),
+            amount=None if document_type == "activity_photo" else amount_val,
             payment_method=extracted.get("payment_method", "unknown"),
             category=extracted.get("category"),
             evidence_status=evidence_status,
@@ -118,15 +132,13 @@ class PublisherAgent:
         self.db.flush()  # get receipt.id before commit
 
         # Task 43: Sync UploadedFile so it appears in the activity file vault
-        if file_id:
-            uploaded_file = self.db.get(UploadedFile, file_id)
-            if uploaded_file:
-                uploaded_file.file_category = "evidence"
-                uploaded_file.file_role = "evidence"
-                if activity_report_id:
-                    uploaded_file.activity_report_id = activity_report_id
-                    uploaded_file.related_entity_type = "activity_report"
-                    uploaded_file.related_entity_id = activity_report_id
+        if uploaded_file:
+            uploaded_file.file_category = "evidence"
+            uploaded_file.file_role = "evidence"
+            if activity_report_id:
+                uploaded_file.activity_report_id = activity_report_id
+                uploaded_file.related_entity_type = "activity_report"
+                uploaded_file.related_entity_id = activity_report_id
 
         self.db.commit()
         self.db.refresh(receipt)

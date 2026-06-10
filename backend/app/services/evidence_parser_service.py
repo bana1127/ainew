@@ -37,6 +37,13 @@ _STATEMENT_KEYWORDS = [
     "거래명세서", "거래명세표", "품명", "수량", "단가",
 ]
 
+_ACTIVITY_PHOTO_KEYWORDS = [
+    "activity photo", "activity_image", "group photo", "people visible",
+    "person visible", "participant", "participants", "people", "person",
+    "face", "faces", "활동사진", "활동 사진", "단체사진", "단체 사진",
+    "사람", "인물", "얼굴", "참가자", "참여자", "회원", "동아리 활동",
+]
+
 
 def detect_document_type_from_text(raw_text: str | None) -> str:
     """Detect document_type from OCR raw text. Returns 'unknown' if no match."""
@@ -66,6 +73,36 @@ def detect_document_type_from_text(raw_text: str | None) -> str:
     return "unknown"
 
 
+def looks_like_activity_photo(
+    raw_text: str | None,
+    file_name: str | None = None,
+    mime_type: str | None = None,
+    amount: int | None = None,
+    extracted_document_type: str | None = None,
+) -> bool:
+    """Return True when image analysis indicates a people/activity photo.
+
+    Activity photos usually have no amount/OCR text. We only auto-classify them
+    when the file is an image and the analysis or filename contains people/activity
+    cues, so ordinary receipt images are not silently reclassified.
+    """
+    if extracted_document_type == "activity_photo":
+        return True
+
+    if mime_type and not mime_type.startswith("image/"):
+        return False
+
+    amount_val = int(amount or 0)
+    if amount_val > 0:
+        return False
+
+    text = " ".join(part for part in [raw_text, file_name] if part).lower()
+    if not text:
+        return False
+
+    return any(keyword.lower() in text for keyword in _ACTIVITY_PHOTO_KEYWORDS)
+
+
 def is_amount_required(document_type: str) -> bool:
     """Return True if amount is required for this document type to be valid."""
     return document_type in {"receipt", "transfer_confirmation", "invoice", "quote", "transaction_statement"}
@@ -83,6 +120,9 @@ def policy_for_document_type(document_type: str, amount: int | None) -> tuple[st
 
     if document_type == "bankbook_copy":
         return "valid", False, "통장 사본은 금액 없어도 유효한 증빙입니다."
+
+    if document_type == "activity_photo":
+        return "valid", False, "활동 사진은 금액 없는 증빙으로 정상 처리됩니다."
 
     if document_type in {"receipt", "transfer_confirmation", "invoice"}:
         if amount_val <= 0:

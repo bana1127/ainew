@@ -7,7 +7,7 @@ from app.schemas.common import ORMModel
 VALID_DOCUMENT_TYPES = {
     "receipt", "business_registration", "bankbook_copy",
     "transfer_confirmation", "invoice", "quote",
-    "transaction_statement", "other", "unknown",
+    "transaction_statement", "activity_photo", "other", "unknown",
 }
 
 
@@ -17,7 +17,7 @@ class ReceiptBase(ORMModel):
     transaction_id: UUID | None = None
     receipt_date: date | None = None
     store_name: str | None = None
-    amount: int = 0
+    amount: int | None = 0
     payment_method: str | None = None
     category: str | None = None
     evidence_status: str = "pending"
@@ -55,4 +55,3 @@ class ReceiptRead(ReceiptBase):
     id: UUID
     created_at: datetime
     updated_at: datetime
-

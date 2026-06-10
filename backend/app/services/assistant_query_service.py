@@ -17,24 +17,58 @@ ASSISTANT_SUGGESTIONS = [
 
 QUERY_INTENTS = {
     "member_count",
+    "executive_list",
+    "member_search",
+    "member_status",
     "activity_count",
+    "activity_list",
+    "activity_detail",
+    "activity_participants",
+    "activity_fee_summary",
+    "activity_fee_unpaid",
+    "activity_fee_paid",
+    "activity_evidence_status",
+    "activity_report_status",
+    "activity_photo_status",
+    "activity_checklist_status",
     "activity_overview",
     "activity_detail_insight",
     "activity_participant_count",
     "membership_fee_status",
     "membership_fee_insight",
+    "membership_fee_summary",
+    "unpaid_members",
+    "paid_members",
+    "exempt_members",
     "activity_fee_status",
     "activity_fee_insight",
+    "activity_photo_status",
+    "activity_photo_missing",
     "calendar_schedule",
+    "calendar_month",
+    "upcoming_events",
+    "today_events",
+    "week_events",
     "budget_summary",
     "budget_insight",
+    "income_expense_summary",
+    "transaction_search",
+    "quarter_summary",
     "cashflow_summary",
     "activity_settlement_status",
     "transaction_review",
     "evidence_missing",
     "evidence_summary",
+    "receipt_list",
+    "business_registration_status",
+    "bankbook_copy_status",
     "report_missing",
     "report_summary",
+    "todo_summary",
+    "missing_report",
+    "missing_evidence",
+    "missing_activity_photo",
+    "unpaid_fee",
     "audit_readiness",
     "document_summary",
     "receipt_summary",
@@ -99,6 +133,8 @@ def route_floating_assistant_intent(
         return "budget_insight"
     if "거래" in text and any(word in text for word in ["확인", "검토", "리뷰", "미분류"]):
         return "transaction_review"
+    if "사진" in text and any(word in text for word in ["활동", "증빙", "올라", "업로드", "빠진", "누락", "없는", "없어"]):
+        return "activity_photo_missing"
     if any(word in text for word in ["증빙", "증거", "영수증 누락"]) and any(
         word in text for word in ["빠진", "누락", "없는", "없어", "미연결"]
     ):
@@ -360,6 +396,49 @@ def get_missing_evidence_activities(db: Any) -> list[dict[str, Any]]:
     ]
 
 
+def get_activity_photo_missing_activities(db: Any) -> list[dict[str, Any]]:
+    from datetime import timedelta
+
+    from sqlalchemy import and_, func, select
+
+    from app.models import ActivityReport, NotificationRule, Receipt
+
+    days_after = db.scalar(
+        select(NotificationRule.days_after).where(
+            NotificationRule.reminder_type == "activity_photo_missing",
+            NotificationRule.deleted_at.is_(None),
+        )
+    )
+    days_after = 2 if days_after is None else int(days_after)
+    cutoff = date.today() - timedelta(days=days_after)
+    acts_with_photo = select(Receipt.activity_report_id).where(
+        and_(
+            Receipt.activity_report_id.isnot(None),
+            Receipt.document_type == "activity_photo",
+        )
+    ).distinct()
+    activities = list(
+        db.scalars(
+            select(ActivityReport).where(
+                ActivityReport.deleted_at.is_(None),
+                ActivityReport.activity_date.isnot(None),
+                ActivityReport.activity_date <= cutoff,
+                ActivityReport.id.notin_(acts_with_photo),
+            )
+        )
+    )
+    return [
+        {
+            "activity_id": str(activity.id),
+            "title": activity.title,
+            "activity_date": str(activity.activity_date) if activity.activity_date else None,
+            "days_after": days_after,
+            "target_url": f"/activities/{activity.id}?tab=evidence",
+        }
+        for activity in activities
+    ]
+
+
 def _chat_for_intent(db: Any, intent: str, message: str, context: dict[str, Any] | None) -> dict[str, Any]:
     context = context or {}
     period = context.get("period") or current_period()
@@ -517,6 +596,46 @@ def _chat_for_intent(db: Any, intent: str, message: str, context: dict[str, Any]
             intent=intent,
             data_sources=["activity_reports", "receipts"],
             links=links or [{"label": "활동 목록", "url": "/activities"}],
+        )
+
+    if intent == "activity_photo_missing":
+        from sqlalchemy import func, select
+
+        from app.models import Receipt
+
+        activity = find_activity_from_message(db, message)
+        if activity is not None:
+            count = db.scalar(
+                select(func.count(Receipt.id)).where(
+                    Receipt.activity_report_id == activity.id,
+                    Receipt.document_type == "activity_photo",
+                )
+            ) or 0
+            if count:
+                answer = f"{activity.title} 활동 사진은 업로드되어 있습니다."
+            else:
+                answer = f"{activity.title} 활동 사진은 아직 업로드되지 않았습니다."
+            return build_chat_response(
+                answer=answer,
+                intent=intent,
+                data_sources=["activity_reports", "receipts"],
+                links=[{"label": "활동 증빙 탭", "url": f"/activities/{activity.id}?tab=evidence"}],
+            )
+
+        missing = get_activity_photo_missing_activities(db)
+        lines = [
+            f"{idx}. {item['title']} - 활동일 {item['activity_date']}, 활동 후 {item['days_after']}일 경과"
+            for idx, item in enumerate(missing[:5], start=1)
+        ]
+        answer = f"활동 사진이 누락된 활동은 {len(missing)}개입니다."
+        if lines:
+            answer += "\n\n" + "\n".join(lines)
+        return build_chat_response(
+            answer=answer,
+            intent=intent,
+            data_sources=["activity_reports", "receipts"],
+            links=[{"label": item["title"], "url": item["target_url"]} for item in missing[:5]]
+            or [{"label": "활동 목록", "url": "/activities"}],
         )
 
     if intent == "transaction_review":
@@ -727,5 +846,15 @@ def answer_floating_assistant_chat(
 ) -> dict[str, Any]:
     if is_mutation_request(message):
         return build_readonly_redirect_response(message)
+    try:
+        from app.services.ops_chatbot_query_service import answer_ops_chatbot_question
+
+        ops_response = answer_ops_chatbot_question(db, message=message, context=context)
+        if ops_response.get("intent") != "unknown":
+            return ops_response
+    except Exception:
+        # Keep the existing read-only assistant path as a fallback if a domain
+        # query service has a partial-data failure.
+        pass
     intent = route_floating_assistant_intent(message, context)
     return _chat_for_intent(db, intent, message, context)

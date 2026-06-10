@@ -96,6 +96,12 @@ class TestLLMServiceReceiptMock:
         assert isinstance(result["confidence"], float)
         assert 0.0 <= result["confidence"] <= 1.0
 
+    def test_mock_activity_photo_hint_returns_activity_photo(self):
+        llm = make_llm()
+        result = llm.analyze_receipt(ReceiptAnalysisPayload(file_name="activity_photo_people.jpg"))
+        assert result["document_type"] == "activity_photo"
+        assert result["amount"] == 0
+
 
 class TestClassifierAgent:
     def test_valid_payment_method_kept(self):

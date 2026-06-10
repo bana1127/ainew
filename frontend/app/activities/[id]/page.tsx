@@ -655,7 +655,7 @@ function ReportTab({
         activity_date: activity.activity_date,
         location: activity.location,
         input_text: activity.input_text,
-        participant_ids: detail.participants
+        participant_ids: (detail.participants ?? [])
           .map((p) => p.member_id)
           .filter((memberId): memberId is string => Boolean(memberId)),
         save_to_db: true,
@@ -826,6 +826,7 @@ function ReportTab({
       <DocumentGenerationSection
         activityId={activityId}
         reportContent={content}
+        activityPhotoCount={(detail.receipts ?? []).filter((r) => r.document_type === "activity_photo").length}
         onUpdated={onUpdated}
       />
     </Card>
@@ -847,10 +848,12 @@ const TEMPLATE_TYPE_LABEL: Record<string, string> = {
 function DocumentGenerationSection({
   activityId,
   reportContent,
+  activityPhotoCount,
   onUpdated,
 }: {
   activityId: string;
   reportContent: string;
+  activityPhotoCount: number;
   onUpdated: () => void;
 }) {
   const tplFileRef = React.useRef<HTMLInputElement>(null);
@@ -860,12 +863,13 @@ function DocumentGenerationSection({
   const [preview, setPreview] = React.useState<DocumentPreviewResult | null>(null);
   const [previewing, setPreviewing] = React.useState(false);
   const [generating, setGenerating] = React.useState(false);
-  const [genResult, setGenResult] = React.useState<{ download_url: string; file_id: string; missing: string[]; mode?: string; replaced_count?: number; participant_count?: number; warnings?: string[] } | null>(null);
+  const [genResult, setGenResult] = React.useState<{ download_url: string; file_id: string; missing: string[]; mode?: string; replaced_count?: number; participant_count?: number; activity_photo_count?: number; warnings?: string[] } | null>(null);
   const [genError, setGenError] = React.useState<string | null>(null);
   const [docTitle, setDocTitle] = React.useState("");
   const [bodyText, setBodyText] = React.useState(reportContent);
   const [markSubmission, setMarkSubmission] = React.useState(false);
   const [submissionMonth, setSubmissionMonth] = React.useState("");
+  const [includeActivityPhotos, setIncludeActivityPhotos] = React.useState(false);
   const [docs, setDocs] = React.useState<GeneratedDocument[]>([]);
   const [loadingDocs, setLoadingDocs] = React.useState(false);
 
@@ -880,6 +884,14 @@ function DocumentGenerationSection({
   React.useEffect(() => {
     setBodyText(reportContent);
   }, [reportContent]);
+
+  React.useEffect(() => {
+    if (activityPhotoCount <= 0) {
+      setIncludeActivityPhotos(false);
+    } else {
+      setIncludeActivityPhotos(true);
+    }
+  }, [activityPhotoCount]);
 
   React.useEffect(() => {
     loadTemplates();
@@ -912,6 +924,7 @@ function DocumentGenerationSection({
       const result = await previewDocument(activityId, {
         template_id: selectedTemplateId,
         overrides: { 활동내용: bodyText, content: bodyText },
+        include_activity_photos: includeActivityPhotos,
       });
       setPreview(result);
     } catch (e: unknown) {
@@ -933,8 +946,9 @@ function DocumentGenerationSection({
         overrides: { 활동내용: bodyText, content: bodyText },
         mark_as_submission: markSubmission,
         submission_month: submissionMonth || undefined,
+        include_activity_photos: includeActivityPhotos,
       });
-      setGenResult({ download_url: result.download_url, file_id: result.file_id ?? result.generated_file_id, missing: result.missing_fields, mode: result.mode, replaced_count: result.replaced_count, participant_count: result.participant_count, warnings: result.warnings });
+      setGenResult({ download_url: result.download_url, file_id: result.file_id ?? result.generated_file_id, missing: result.missing_fields, mode: result.mode, replaced_count: result.replaced_count, participant_count: result.participant_count, activity_photo_count: result.activity_photo_count, warnings: result.warnings });
       loadDocs();
       onUpdated();
     } catch (e: unknown) {
@@ -1057,6 +1071,22 @@ function DocumentGenerationSection({
               placeholder="예: Oui Parfum_20260530_정기스터디" style={inputSt} />
           </div>
 
+          {activityPhotoCount > 0 && (
+            <div className="rounded-xl p-3" style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}>
+              <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "var(--text-main)" }}>
+                <input
+                  type="checkbox"
+                  checked={includeActivityPhotos}
+                  onChange={(e) => setIncludeActivityPhotos(e.target.checked)}
+                />
+                보고서에 활동 사진 포함
+              </label>
+              <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                업로드된 활동 사진 {activityPhotoCount}건 중 첫 번째 사진을 HWPX의 활동 사진 영역에 넣습니다.
+              </p>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-4">
             <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "var(--text-main)" }}>
               <input type="checkbox" checked={markSubmission} onChange={(e) => setMarkSubmission(e.target.checked)} />
@@ -1135,6 +1165,9 @@ function DocumentGenerationSection({
                 {genResult.participant_count != null && (
                   <p className="text-xs" style={{ color: "var(--success)" }}>참여자: {genResult.participant_count}명</p>
                 )}
+                {genResult.activity_photo_count != null && genResult.activity_photo_count > 0 && (
+                  <p className="text-xs" style={{ color: "var(--success)" }}>활동 사진: {genResult.activity_photo_count}건</p>
+                )}
                 {genResult.mode && (
                   <p className="text-xs" style={{ color: "var(--success)" }}>모드: {genResult.mode}</p>
                 )}
@@ -1208,6 +1241,7 @@ const DOCUMENT_TYPE_OPTIONS_UPLOAD = [
   { value: "invoice", label: "청구서" },
   { value: "quote", label: "견적서" },
   { value: "transaction_statement", label: "거래명세서" },
+  { value: "activity_photo", label: "활동 사진" },
   { value: "other", label: "기타 증빙" },
 ];
 
@@ -1434,7 +1468,7 @@ function ReceiptsTab({
                       <EvidenceDocumentTypeBadge documentType={r.document_type || "unknown"} size="xs" />
                       <p className="font-medium text-sm" style={{ color: "var(--text-main)" }}>
                         {String(displayTitle)}
-                        {r.amount > 0 && (
+                        {r.amount != null && r.amount > 0 && (
                           <span className="ml-2 text-xs" style={{ color: "var(--text-muted)" }}>
                             {fmt(r.amount)}원
                           </span>
@@ -1529,7 +1563,7 @@ function ReceiptsTab({
                         {r.store_name ?? "(상호명 없음)"}
                       </p>
                       <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                        {r.receipt_date ?? ""} · {r.amount > 0 ? `${fmt(r.amount)}원` : "금액 없음"}
+                        {r.receipt_date ?? ""} · {r.amount != null && r.amount > 0 ? `${fmt(r.amount)}원` : "금액 없음"}
                       </p>
                     </div>
                     <Button
@@ -2822,7 +2856,10 @@ export default function ActivityDetailPage() {
     );
   }
 
-  const { activity, checklist } = detail;
+  const { activity } = detail;
+  const checklist = detail.checklist ?? [];
+  const participants = detail.participants ?? [];
+  const receipts = detail.receipts ?? [];
 
   const completedCount = checklist.filter((c) => c.done).length;
 
@@ -2882,7 +2919,7 @@ export default function ActivityDetailPage() {
                 )}
                 <span className="flex items-center gap-1 text-sm" style={{ color: "var(--text-muted)" }}>
                   <Users className="h-3.5 w-3.5" />
-                  {detail.participants.length}명 참여
+                  {participants.length}명 참여
                 </span>
               </div>
             </div>
@@ -2942,7 +2979,7 @@ export default function ActivityDetailPage() {
           {activeTab === "participants" && (
             <ParticipantsTab
               activityId={activityId}
-              participants={detail.participants}
+              participants={participants}
               onUpdated={load}
             />
           )}
@@ -2959,7 +2996,7 @@ export default function ActivityDetailPage() {
           {activeTab === "receipts" && (
             <ReceiptsTab
               activityId={activityId}
-              receipts={detail.receipts}
+              receipts={receipts}
               onUpdated={load}
             />
           )}

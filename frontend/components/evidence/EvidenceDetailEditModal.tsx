@@ -9,7 +9,7 @@ type ReceiptRow = {
   document_type: string;
   title?: string | null;
   store_name?: string | null;
-  amount: number;
+  amount: number | null;
   receipt_date?: string | null;
   payment_method?: string | null;
   category?: string | null;

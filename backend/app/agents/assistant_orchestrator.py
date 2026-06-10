@@ -1757,6 +1757,19 @@ class AssistantOrchestrator:
             )
 
         summary = preview.summary
+        warnings: list[str] = []
+        can_apply = summary.will_create_participants > 0 or summary.will_update_participants > 0
+        if summary.total_rows > 0 and not can_apply:
+            warnings.append(
+                "기존 부원 명단과 대조했지만 바로 연결 가능한 부원이 없습니다. "
+                "먼저 부원/명단을 등록한 뒤 다시 실행해 주세요."
+            )
+        elif summary.unregistered_candidates or summary.duplicate_candidates or summary.needs_review:
+            warnings.append(
+                "일부 행은 기존 부원과 확정 매칭되지 않아 AI 작업실의 일괄 반영에서 제외됩니다. "
+                "외부 참여자 처리나 새 부원 등록이 필요하면 활동 상세의 명단 탭에서 선택해 주세요."
+            )
+
         msg_lines = [
             f"명단 파일을 분석했습니다.",
             f"기존 부원 연결: {summary.matched_members}명",
@@ -1767,7 +1780,8 @@ class AssistantOrchestrator:
             msg_lines.append(f"이미 참가자: {summary.already_participants}명")
         if summary.duplicate_candidates:
             msg_lines.append(f"중복 후보: {summary.duplicate_candidates}명")
-        msg_lines.append("확인 후 반영하시겠습니까?")
+        msg_lines.extend(warnings)
+        msg_lines.append("확인 후 반영하시겠습니까?" if can_apply else "반영 가능한 참여자가 없습니다.")
         msg = "\n".join(msg_lines)
 
         return AssistantExecuteResponse(
@@ -1787,12 +1801,13 @@ class AssistantOrchestrator:
                     "already_participants": summary.already_participants,
                     "will_create_participants": summary.will_create_participants,
                 },
-                "requires_confirmation": True,
+                "warnings": warnings,
+                "requires_confirmation": can_apply,
                 "auto_apply": False,
             },
-            requires_confirmation=True,
+            requires_confirmation=can_apply,
             message=msg,
-            apply_payload={"action_id": preview.action_id},
+            apply_payload={"action_id": preview.action_id} if can_apply else None,
             detail_url=f"/activities/{activity_res.activity_id}",
             activity_context=_build_activity_context_dict(activity_res),
         )

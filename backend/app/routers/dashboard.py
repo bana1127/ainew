@@ -1,5 +1,5 @@
 import calendar
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, func, or_, select
@@ -13,6 +13,7 @@ from app.models import (
     BankTransaction,
     Member,
     Notification,
+    NotificationRule,
     PaymentRecord,
     Receipt,
     ReferenceReport,
@@ -312,11 +313,38 @@ def dashboard_todo(db: Session = Depends(get_db)) -> dict:
             )
         )
     ) or 0
+    photo_days_after = db.scalar(
+        select(NotificationRule.days_after).where(
+            and_(
+                NotificationRule.reminder_type == "activity_photo_missing",
+                NotificationRule.deleted_at.is_(None),
+            )
+        )
+    )
+    photo_days_after = 2 if photo_days_after is None else int(photo_days_after)
+    photo_cutoff = date.today() - timedelta(days=photo_days_after)
+    acts_with_activity_photo_subq = select(Receipt.activity_report_id).where(
+        and_(
+            Receipt.activity_report_id.isnot(None),
+            Receipt.document_type == "activity_photo",
+        )
+    ).distinct()
+    no_activity_photo_activities = db.scalar(
+        select(func.count(ActivityReport.id)).where(
+            and_(
+                ActivityReport.deleted_at.is_(None),
+                ActivityReport.activity_date.isnot(None),
+                ActivityReport.activity_date <= photo_cutoff,
+                ActivityReport.id.notin_(acts_with_activity_photo_subq),
+            )
+        )
+    ) or 0
 
     return {
         "unpaid_membership_fee": unpaid_membership_fee,
         "unpaid_activity_fee": unpaid_activity_fee,
         "no_report_activities": no_report_activities,
         "no_evidence_activities": no_evidence_activities,
+        "no_activity_photo_activities": no_activity_photo_activities,
         "no_hwpx_activities": no_hwpx_activities,
     }

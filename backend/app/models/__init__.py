@@ -10,7 +10,7 @@ from app.models.budget import BudgetCategory, BudgetPlan
 from app.models.calendar import CalendarEvent
 from app.models.file import UploadedFile
 from app.models.member import Member
-from app.models.notification import Notification
+from app.models.notification import Notification, NotificationDeliveryLog, NotificationRule
 from app.models.payment import PaymentAdjustmentLog, PaymentRecord
 from app.models.receipt import Receipt
 from app.models.setting import AppSetting
@@ -30,6 +30,8 @@ __all__ = [
     "CalendarEvent",
     "Member",
     "Notification",
+    "NotificationDeliveryLog",
+    "NotificationRule",
     "PaymentAdjustmentLog",
     "PaymentRecord",
     "Receipt",

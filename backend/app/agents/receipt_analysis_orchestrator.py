@@ -78,6 +78,7 @@ class ReceiptAnalysisOrchestrator:
             mime_type=input_data.mime_type,
             manual_payment_method=input_data.manual_payment_method,
             manual_category=input_data.manual_category,
+            document_type=input_data.document_type,
         )
         extracted_dict = ReceiptAgent(self.llm).extract(payload)
 
@@ -108,6 +109,7 @@ class ReceiptAnalysisOrchestrator:
         # 6. Publisher Agent: save to receipts table if requested
         receipt_id: UUID | None = None
         saved = False
+        final_document_type = input_data.document_type
         if input_data.save_to_db:
             from app.agents.publisher_agent import PublisherAgent
             receipt_id, saved = PublisherAgent(self.db).publish_receipt(
@@ -119,6 +121,14 @@ class ReceiptAnalysisOrchestrator:
                 reason=policy.reason,
                 document_type=input_data.document_type,
             )
+            if receipt_id:
+                from app.models.receipt import Receipt
+                saved_receipt = self.db.get(Receipt, receipt_id)
+                if saved_receipt:
+                    final_document_type = saved_receipt.document_type or final_document_type
+                    policy.evidence_status = saved_receipt.evidence_status
+                    policy.need_check = saved_receipt.need_check
+                    policy.reason = saved_receipt.reason or policy.reason
 
         extracted = ExtractedData(
             receipt_date=extracted_dict.get("receipt_date"),
@@ -147,5 +157,5 @@ class ReceiptAnalysisOrchestrator:
             policy=policy_data,
             saved=saved,
             model=model_str,
-            document_type=input_data.document_type,
+            document_type=final_document_type,
         )

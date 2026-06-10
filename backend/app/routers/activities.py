@@ -20,6 +20,7 @@ from app.models.file import UploadedFile
 from app.models.payment import PaymentRecord
 from app.models.receipt import Receipt
 from app.routers.common import apply_updates, commit_or_400, get_or_404
+from app.services.activity_photo_service import build_activity_photo_checklist_item
 
 router = APIRouter()
 
@@ -315,6 +316,22 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
             )
         )
     ) or 0
+    activity_photo_count = db.scalar(
+        select(func.count(Receipt.id)).where(
+            and_(
+                Receipt.activity_report_id == activity_id,
+                Receipt.document_type == "activity_photo",
+            )
+        )
+    ) or 0
+    # Keep the activity detail endpoint independent from optional notification tables.
+    # If notification migrations are not present yet, detail pages should still load.
+    photo_days_after = 2
+    activity_photo_checklist = build_activity_photo_checklist_item(
+        activity_photo_count,
+        report.activity_date,
+        photo_days_after,
+    )
 
     checklist = [
         {"key": "participants", "label": "참여자 등록", "done": has_participants, "count": len(participants)},
@@ -325,6 +342,7 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
          "detail": f"{paid_count}/{len(active_fee_records)}" if active_fee_records else None},
         {"key": "receipts", "label": "영수증 연결", "done": has_receipts, "count": len(receipts)},
         {"key": "receipts_ok", "label": "증빙 확인", "done": receipts_ok},
+        activity_photo_checklist,
         {"key": "files", "label": "파일 등록", "done": file_count > 0, "count": file_count},
         {"key": "submission_files", "label": "제출용 파일 지정", "done": submission_file_count > 0,
          "count": submission_file_count},
@@ -372,6 +390,7 @@ def get_activity_detail(activity_id: UUID, db: Session = Depends(get_db)) -> dic
                 "evidence_status": r.evidence_status,
                 "need_check": r.need_check,
                 "reason": r.reason,
+                "document_type": r.document_type or "unknown",
                 "file_id": str(r.file_id) if r.file_id else None,
             }
             for r in receipts
@@ -1167,6 +1186,7 @@ class DocumentGeneratePayload(BaseModel):
     overrides: dict[str, str] = {}
     mark_as_submission: bool = False
     submission_month: str | None = None
+    include_activity_photos: bool = False
 
 
 @router.post("/{activity_id}/documents/preview")
@@ -1189,7 +1209,12 @@ def preview_document(
 
     template_abs = resolve_abs_path(tpl_file)
 
-    ctx = build_generation_context(db, activity_id, payload.overrides or {})
+    ctx = build_generation_context(
+        db,
+        activity_id,
+        payload.overrides or {},
+        include_activity_photos=payload.include_activity_photos,
+    )
     report = _get_active_activity_or_404(db, activity_id)
 
     mode, mappings, warnings = build_preview_mappings(template_abs, ctx)
@@ -1205,6 +1230,7 @@ def preview_document(
         "warnings": warnings,
         "mapped_fields": mapped_fields,
         "missing_fields": [],
+        "activity_photo_count": len(ctx.activity_photo_paths),
         "content_preview": {
             "title": report.title,
             "body": ctx.report_body[:200] if ctx.report_body else "",
@@ -1241,7 +1267,12 @@ def generate_document(
     if not template_abs.exists():
         raise HTTPException(status_code=404, detail="템플릿 파일을 찾을 수 없습니다.")
 
-    ctx = build_generation_context(db, activity_id, payload.overrides or {})
+    ctx = build_generation_context(
+        db,
+        activity_id,
+        payload.overrides or {},
+        include_activity_photos=payload.include_activity_photos,
+    )
 
     # Build output path
     from uuid import uuid4 as _uuid4
@@ -1292,6 +1323,8 @@ def generate_document(
             "mapped_fields": result.mapped_fields,
             "missing_fields": result.missing_fields,
             "warnings": result.warnings,
+            "include_activity_photos": payload.include_activity_photos,
+            "activity_photo_count": len(ctx.activity_photo_paths),
         },
     )
     db.add(gen_file)
@@ -1309,6 +1342,7 @@ def generate_document(
         "replaced_count": result.replaced_count,
         "participant_count": result.participant_count,
         "warnings": result.warnings,
+        "activity_photo_count": len(ctx.activity_photo_paths),
     }
 
 
@@ -1801,6 +1835,7 @@ def upload_activity_evidence(
             need_check = result.policy.need_check
             reason = result.policy.reason
             model_str = result.model
+            document_type = result.document_type
             extracted_dict = {
                 "store_name": result.extracted.store_name,
                 "amount": result.extracted.amount,
@@ -1812,14 +1847,21 @@ def upload_activity_evidence(
             }
         except Exception as exc:
             # Analysis failed but file is already saved → create a basic receipt record
+            fallback_status = "valid" if document_type == "activity_photo" else "pending"
+            fallback_need_check = False if document_type == "activity_photo" else True
+            fallback_reason = (
+                "활동 사진은 금액 없는 증빙으로 업로드되었습니다."
+                if document_type == "activity_photo"
+                else f"분석 실패: {exc}"
+            )
             receipt = Receipt(
                 file_id=uploaded.id,
                 activity_report_id=activity_id,
                 document_type=document_type,
-                evidence_status="pending",
-                need_check=True,
-                reason=f"분석 실패: {exc}",
-                amount=0,
+                evidence_status=fallback_status,
+                need_check=fallback_need_check,
+                reason=fallback_reason,
+                amount=None if document_type == "activity_photo" else 0,
             )
             db.add(receipt)
             commit_or_400(db, "Could not create receipt record")

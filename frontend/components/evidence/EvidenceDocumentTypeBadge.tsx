@@ -8,6 +8,7 @@ export const DOCUMENT_TYPE_LABELS: Record<string, string> = {
   invoice: "청구서",
   quote: "견적서",
   transaction_statement: "거래명세서",
+  activity_photo: "활동 사진",
   other: "기타 증빙",
   unknown: "미분류",
 };
@@ -20,6 +21,7 @@ const DOCUMENT_TYPE_COLORS: Record<string, { bg: string; text: string }> = {
   invoice: { bg: "#fee2e2", text: "#991b1b" },
   quote: { bg: "#fce7f3", text: "#831843" },
   transaction_statement: { bg: "#f3f4f6", text: "#374151" },
+  activity_photo: { bg: "#dcfce7", text: "#166534" },
   other: { bg: "#f3f4f6", text: "#6b7280" },
   unknown: { bg: "#f9fafb", text: "#9ca3af" },
 };

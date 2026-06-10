@@ -9,5 +9,6 @@ pandas
 openpyxl
 xlrd
 lxml
+Pillow
 pytest
 openai

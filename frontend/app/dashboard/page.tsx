@@ -100,6 +100,13 @@ function DashboardTodoList({
       urgent: false,
     },
     {
+      label: "활동 사진 누락",
+      value: todo?.no_activity_photo_activities ?? 0,
+      href: "/activities",
+      icon: ReceiptText,
+      urgent: false,
+    },
+    {
       label: "HWPX 미생성 활동",
       value: todo?.no_hwpx_activities ?? 0,
       href: "/activities",

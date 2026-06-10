@@ -66,6 +66,7 @@ const DOCUMENT_TYPE_UPLOAD_OPTIONS = [
   { value: "invoice", label: "청구서" },
   { value: "quote", label: "견적서" },
   { value: "transaction_statement", label: "거래명세서" },
+  { value: "activity_photo", label: "활동 사진" },
   { value: "other", label: "기타 증빙" },
 ];
 

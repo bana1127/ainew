@@ -232,6 +232,7 @@ function ActivityImportResultCard({ result }: { result: Record<string, unknown> 
 
 function ParticipantImportPreviewCard({ result }: { result: Record<string, unknown> }) {
   const summary = result.summary as Record<string, number> | undefined;
+  const warnings = (result.warnings as string[] | undefined) ?? [];
   const rows = (result.rows as Array<{
     row_index?: number;
     name?: string | null;
@@ -260,6 +261,16 @@ function ParticipantImportPreviewCard({ result }: { result: Record<string, unkno
 
   return (
     <div className="space-y-3">
+      {warnings.length > 0 && (
+        <div className="rounded-xl p-3"
+          style={{ background: "var(--warning-soft, #fef3c7)", border: "1px solid rgba(180,83,9,0.2)" }}>
+          {warnings.map((warning) => (
+            <p key={warning} className="text-xs font-medium" style={{ color: "var(--warning, #b45309)" }}>
+              {warning}
+            </p>
+          ))}
+        </div>
+      )}
       {summary && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {[

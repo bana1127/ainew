@@ -42,6 +42,11 @@ class AssistantChatContext(BaseModel):
     activity_id: UUID | None = None
     last_activity_id: UUID | None = None
     period: str | None = None
+    current_page: str | None = None
+    current_activity_id: UUID | None = None
+    current_tab: str | None = None
+    visible_filters: dict[str, Any] | None = None
+    quarter: str | None = None
 
 
 class AssistantChatRequest(BaseModel):
@@ -60,3 +65,8 @@ class AssistantChatResponse(BaseModel):
     data_sources: list[str]
     links: list[AssistantChatLink]
     confidence: float
+    summary: list[dict[str, str]] = []
+    items: list[dict[str, Any]] = []
+    zero_reasons: list[str] = []
+    scope: str | None = None
+    context_used: dict[str, Any] = {}

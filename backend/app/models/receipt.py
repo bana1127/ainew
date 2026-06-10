@@ -24,6 +24,7 @@ DOCUMENT_TYPE_LABELS: dict[str, str] = {
     "invoice": "청구서",
     "quote": "견적서",
     "transaction_statement": "거래명세서",
+    "activity_photo": "활동 사진",
     "other": "기타 증빙",
     "unknown": "미분류",
 }
@@ -50,7 +51,7 @@ class Receipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     receipt_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     store_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    amount: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    amount: Mapped[int | None] = mapped_column(Integer, default=0, nullable=True)
     payment_method: Mapped[str | None] = mapped_column(String(100), nullable=True)
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
     evidence_status: Mapped[str] = mapped_column(
@@ -77,4 +78,3 @@ class Receipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     transaction: Mapped[BankTransaction | None] = relationship(
         foreign_keys=[transaction_id]
     )
-

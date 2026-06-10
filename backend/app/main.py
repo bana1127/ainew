@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.core.database import SessionLocal
 from app.routers import (
     activities,
     activity_categories,
@@ -16,6 +17,7 @@ from app.routers import (
     document_templates,
     files,
     health,
+    integrations,
     members,
     notifications,
     payment_matching,
@@ -89,6 +91,11 @@ def create_app() -> FastAPI:
         tags=["notifications"],
     )
     app.include_router(settings_router.router, prefix="/api/settings", tags=["settings"])
+    app.include_router(
+        integrations.router,
+        prefix="/api/integrations",
+        tags=["integrations"],
+    )
     app.include_router(files.router, prefix="/api/files", tags=["files"])
     app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
     app.include_router(receipt_agents.router, prefix="/api/agents", tags=["agents"])
@@ -113,6 +120,12 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def ensure_upload_directory() -> None:
         settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        from app.services.notification_seed_service import (
+            try_ensure_default_notification_rules,
+        )
+
+        with SessionLocal() as db:
+            try_ensure_default_notification_rules(db)
 
     @app.get("/")
     def root() -> dict[str, str]:

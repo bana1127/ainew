@@ -23,6 +23,7 @@ class ReceiptAnalysisPayload:
     mime_type: str | None = None
     manual_payment_method: str | None = None
     manual_category: str | None = None
+    document_type: str = "unknown"
 
 
 _SYSTEM_PROMPT = """
@@ -255,6 +256,18 @@ class LLMService:
     def _analyze_receipt_mock(self, payload: ReceiptAnalysisPayload) -> dict:
         import re
         fname = payload.file_name.lower()
+        activity_photo_hints = ("activity_photo", "activity-photo", "people", "person", "group", "활동사진", "활동 사진")
+        if payload.document_type == "activity_photo" or any(hint in fname for hint in activity_photo_hints):
+            return {
+                "receipt_date": None,
+                "store_name": None,
+                "amount": 0,
+                "payment_method": "unknown",
+                "category": payload.manual_category or "activity_photo",
+                "raw_text": f"activity photo: people visible in {payload.file_name}",
+                "confidence": 0.9,
+                "document_type": "activity_photo",
+            }
 
         # Try to extract amount from filename (first number found)
         amounts = re.findall(r'\d+', fname)
@@ -293,6 +306,7 @@ class LLMService:
             "category": category,
             "raw_text": f"MOCK RECEIPT {payload.file_name} {amount:,}원 {payment_method}",
             "confidence": 0.75,
+            "document_type": "receipt",
         }
 
     def _analyze_receipt_real(self, payload: ReceiptAnalysisPayload) -> dict:
@@ -303,7 +317,7 @@ class LLMService:
         client = openai.OpenAI(api_key=self.api_key)
 
         RECEIPT_SYSTEM_PROMPT = """
-당신은 영수증 분석 전문가입니다. 영수증 이미지 또는 파일 정보를 분석하여 다음 JSON을 반환하세요:
+당신은 동아리 활동 증빙 분석 전문가입니다. 영수증/계좌이체/문서/활동사진 이미지를 분석하여 다음 JSON을 반환하세요:
 {
   "receipt_date": "YYYY-MM-DD 또는 null",
   "store_name": "string 또는 null",
@@ -311,9 +325,11 @@ class LLMService:
   "payment_method": "card | online_card | transfer_student | transfer_company | cash_withdrawal | personal_card_reimbursement | recurring_payment | unknown",
   "category": "string 또는 null",
   "raw_text": "인식된 전체 텍스트 또는 null",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "document_type": "receipt | business_registration | bankbook_copy | transfer_confirmation | invoice | quote | transaction_statement | activity_photo | other | unknown"
 }
 payment_method는 반드시 위 목록 중 하나여야 합니다. amount는 정수여야 합니다.
+사람, 얼굴, 참가자, 단체 모습이 보이는 일반 활동 현장 사진이고 결제/거래 문서가 아니면 document_type은 반드시 "activity_photo"로 반환하세요. 이 경우 amount는 0, payment_method는 "unknown"으로 두고 raw_text에는 보이는 사람/활동 장면을 짧게 설명하세요.
 """
 
         messages = [{"role": "system", "content": RECEIPT_SYSTEM_PROMPT.strip()}]
@@ -328,15 +344,15 @@ payment_method는 반드시 위 목록 중 하나여야 합니다. amount는 정
                         "role": "user",
                         "content": [
                             {"type": "image_url", "image_url": {"url": f"data:{payload.mime_type};base64,{b64}"}},
-                            {"type": "text", "text": f"파일명: {payload.file_name}\n위 영수증을 분석해 주세요."},
+                            {"type": "text", "text": f"파일명: {payload.file_name}\n사용자가 선택한 문서 유형: {payload.document_type}\n위 증빙 파일을 분석해 주세요."},
                         ]
                     })
                 else:
-                    messages.append({"role": "user", "content": f"파일명: {payload.file_name}\n파일을 기반으로 영수증 정보를 추론해 주세요."})
+                    messages.append({"role": "user", "content": f"파일명: {payload.file_name}\n사용자가 선택한 문서 유형: {payload.document_type}\n파일을 기반으로 증빙 정보를 추론해 주세요."})
             except Exception:
-                messages.append({"role": "user", "content": f"파일명: {payload.file_name}\n파일을 기반으로 영수증 정보를 추론해 주세요."})
+                messages.append({"role": "user", "content": f"파일명: {payload.file_name}\n사용자가 선택한 문서 유형: {payload.document_type}\n파일을 기반으로 증빙 정보를 추론해 주세요."})
         else:
-            messages.append({"role": "user", "content": f"파일명: {payload.file_name}\n파일을 기반으로 영수증 정보를 추론해 주세요."})
+            messages.append({"role": "user", "content": f"파일명: {payload.file_name}\n사용자가 선택한 문서 유형: {payload.document_type}\n파일을 기반으로 증빙 정보를 추론해 주세요."})
 
         try:
             response = client.chat.completions.create(
@@ -353,12 +369,22 @@ payment_method는 반드시 위 목록 중 하나여야 합니다. amount는 정
         except json.JSONDecodeError as exc:
             raise ValueError("OpenAI 응답 파싱 실패") from exc
 
+        try:
+            amount = int(parsed.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0
+        try:
+            confidence = float(parsed.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+
         return {
             "receipt_date": parsed.get("receipt_date"),
             "store_name": parsed.get("store_name"),
-            "amount": int(parsed.get("amount", 0)),
+            "amount": amount,
             "payment_method": parsed.get("payment_method", "unknown"),
             "category": parsed.get("category"),
             "raw_text": parsed.get("raw_text"),
-            "confidence": float(parsed.get("confidence", 0.0)),
+            "confidence": confidence,
+            "document_type": parsed.get("document_type", "unknown"),
         }

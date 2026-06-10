@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     OPENAI_MOCK_MODE: bool = True
     OPENAI_VISION_MODEL: str = ""
     AUTOMATION_API_TOKEN: str = ""
+    N8N_WEBHOOK_URL: str = ""
+    N8N_SECRET: str = ""
+    N8N_ENABLED: bool = True
+    FRONTEND_URL: str = ""
 
     @property
     def cors_origins(self) -> list[str]:

@@ -20,6 +20,8 @@ import re
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import io
+import mimetypes
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -42,6 +44,11 @@ _XML_EXTS = {".xml", ".hml", ".hml2", ".hpf"}
 # Section XML glob patterns (the main document body)
 _SECTION_PATTERNS = ("Contents/section", "Contents/Section")
 
+_ACTIVITY_PHOTO_FALLBACK_WIDTH = 36000
+_ACTIVITY_PHOTO_FALLBACK_HEIGHT = 19000
+_ACTIVITY_PHOTO_MAX_WIDTH = 40932
+_ACTIVITY_PHOTO_MAX_HEIGHT = 22000
+
 
 # ── Data classes ──────────────────────────────────────────────────────────────
 
@@ -61,6 +68,7 @@ class HwpxContext:
     expense_summary: str = ""
     evidence_summary: str = ""
     feedback_summary: str = ""
+    activity_photo_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -88,6 +96,7 @@ def build_generation_context(
     db: Any,
     activity_id: str | UUID,
     overrides: dict[str, str] | None = None,
+    include_activity_photos: bool = False,
 ) -> HwpxContext:
     """Build a rich HwpxContext from DB data for the given activity."""
     from sqlalchemy import select
@@ -167,6 +176,31 @@ def build_generation_context(
         club_name=club_name,
         representative_name=representative_name,
     )
+
+    if include_activity_photos:
+        try:
+            from app.models.file import UploadedFile
+            from app.models.receipt import Receipt
+            from app.services.file_storage_service import resolve_abs_path
+
+            photo_files = list(db.scalars(
+                select(UploadedFile)
+                .join(Receipt, Receipt.file_id == UploadedFile.id)
+                .where(
+                    Receipt.activity_report_id == aid,
+                    Receipt.document_type == "activity_photo",
+                    UploadedFile.deleted_at.is_(None),
+                )
+                .order_by(Receipt.created_at.asc())
+            ))
+            for photo_file in photo_files:
+                if photo_file.mime_type and not photo_file.mime_type.startswith("image/"):
+                    continue
+                abs_path = resolve_abs_path(photo_file)
+                if abs_path.exists():
+                    ctx.activity_photo_paths.append(str(abs_path))
+        except Exception:
+            pass
 
     # Apply user overrides
     if overrides:
@@ -308,6 +342,15 @@ def build_preview_mappings(
         else:
             warnings.append("참여자가 없습니다. 참여자 명단 없이 생성됩니다.")
 
+    if ctx.activity_photo_paths:
+        mappings.append({
+            "source": "활동 사진 영역",
+            "target": f"{len(ctx.activity_photo_paths)}장 중 첫 번째 사진 삽입",
+            "field": "activity_photos",
+        })
+        if len(ctx.activity_photo_paths) > 1:
+            warnings.append("현재 HWPX 자동 생성은 활동 사진 영역에 첫 번째 사진만 삽입합니다.")
+
     return mode, mappings, warnings
 
 
@@ -361,10 +404,14 @@ def generate_hwpx(
     all_warnings: list[str] = []
     mapped_fields: dict[str, str] = {}
     missing_fields: list[str] = []
+    photo_entries = _build_activity_photo_entries(ctx.activity_photo_paths)
+    photo_inserted = False
 
     with zipfile.ZipFile(str(template_path), "r") as src_zf:
         with zipfile.ZipFile(str(output_path), "w", zipfile.ZIP_DEFLATED) as dst_zf:
             section_names = _section_xml_names(src_zf)
+            existing_names = set(src_zf.namelist())
+            _prepare_activity_photo_entries_for_template(src_zf, section_names, photo_entries)
 
             for item in src_zf.infolist():
                 raw = src_zf.read(item.filename)
@@ -383,11 +430,36 @@ def generate_hwpx(
                         total_replaced += n
                         all_mappings.extend(m)
                         all_warnings.extend(w)
+                        if photo_entries and not photo_inserted:
+                            text, n, w = _insert_activity_photo_into_xml(text, photo_entries[0])
+                            if n:
+                                photo_inserted = True
+                                total_replaced += n
+                                all_mappings.append({
+                                    "source": "활동 사진 영역",
+                                    "target": Path(photo_entries[0]["source_path"]).name,
+                                    "field": "activity_photos",
+                                })
+                                if len(photo_entries) > 1:
+                                    all_warnings.append("활동 사진이 여러 장 있어 첫 번째 사진만 HWPX에 삽입했습니다.")
+                            all_warnings.extend(w)
                         raw = text.encode("utf-8")
                     except Exception as exc:
                         all_warnings.append(f"XML 처리 오류 ({item.filename}): {exc}")
+                    if item.filename == "Contents/header.xml" and photo_entries:
+                        raw = _append_header_bindata_items(raw, photo_entries)
+                elif item.filename == "Contents/content.hpf" and photo_entries:
+                    raw = _append_hpf_image_items(raw, photo_entries)
+                # META-INF/manifest.xml is intentionally left unchanged - HWP keeps it empty even with images
 
                 dst_zf.writestr(item, raw)
+
+            if photo_entries and not photo_inserted:
+                all_warnings.append("템플릿에서 활동 사진을 넣을 영역을 찾지 못했습니다.")
+
+            for entry in photo_entries:
+                if entry["zip_path"] not in existing_names:
+                    dst_zf.writestr(entry["zip_path"], entry["data"])
 
     # Dedup mappings
     seen_fields = set()
@@ -413,6 +485,394 @@ def generate_hwpx(
         mapped_fields=mapped_fields,
         missing_fields=missing_fields,
     )
+
+
+def _build_activity_photo_entries(photo_paths: list[str]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for idx, photo_path in enumerate(photo_paths[:1], start=1):
+        path = Path(photo_path)
+        if not path.exists() or not path.is_file():
+            continue
+        ext = path.suffix.lower() or ".jpg"
+        if ext not in {".jpg", ".jpeg", ".png", ".gif", ".bmp"}:
+            continue
+        mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        zip_name = f"BinData/activity_photo_{idx}{ext}"
+        entries.append({
+            "id": f"activityPhoto{idx}",
+            "zip_path": zip_name,
+            "source_path": str(path),
+            "data": path.read_bytes(),
+            "mime_type": mime_type,
+            "pixel_size": _read_image_pixel_size(path),
+            "width": _ACTIVITY_PHOTO_FALLBACK_WIDTH,
+            "height": _ACTIVITY_PHOTO_FALLBACK_HEIGHT,
+        })
+    return entries
+
+
+def _prepare_activity_photo_entries_for_template(
+    zf: zipfile.ZipFile,
+    section_names: list[str],
+    photo_entries: list[dict[str, Any]],
+) -> None:
+    if not photo_entries:
+        return
+    for section_name in section_names:
+        try:
+            xml_text = zf.read(section_name).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        fit_box = _find_activity_photo_fit_box(xml_text)
+        if fit_box is None:
+            continue
+        for entry in photo_entries:
+            _fit_activity_photo_binary_to_box(entry, *fit_box)
+        return
+
+
+def _find_activity_photo_fit_box(xml_text: str) -> tuple[int, int] | None:
+    rows = _iter_rows(xml_text)
+    for idx, row in enumerate(rows):
+        if "활동 사진" not in row[2] or idx + 1 >= len(rows):
+            continue
+        _target_start, _target_end, target_row = rows[idx + 1]
+        cells = _iter_cells(target_row)
+        if not cells:
+            return None
+        _cell_start, _cell_end, cell_xml = cells[0]
+        return _activity_photo_fit_box(cell_xml)
+    return None
+
+
+def _fit_activity_photo_binary_to_box(photo_entry: dict[str, Any], box_width: int, box_height: int) -> None:
+    try:
+        from PIL import Image, ImageOps
+    except Exception:
+        photo_entry["width"] = box_width
+        photo_entry["height"] = box_height
+        return
+
+    try:
+        source_path = Path(str(photo_entry["source_path"]))
+        with Image.open(source_path) as image:
+            image = ImageOps.exif_transpose(image)
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA")
+
+            canvas_width = max(1, round(box_width / 75))
+            canvas_height = max(1, round(box_height / 75))
+            scale = min(canvas_width / image.width, canvas_height / image.height)
+            resized_width = max(1, round(image.width * scale))
+            resized_height = max(1, round(image.height * scale))
+
+            resample = getattr(Image, "Resampling", Image).LANCZOS
+            resized = image.resize((resized_width, resized_height), resample)
+            canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
+            if resized.mode == "RGBA":
+                canvas.paste(
+                    resized,
+                    ((canvas_width - resized_width) // 2, (canvas_height - resized_height) // 2),
+                    resized,
+                )
+            else:
+                canvas.paste(
+                    resized.convert("RGB"),
+                    ((canvas_width - resized_width) // 2, (canvas_height - resized_height) // 2),
+                )
+
+            buf = io.BytesIO()
+            canvas.save(buf, format="PNG", optimize=True)
+    except Exception:
+        photo_entry["width"] = box_width
+        photo_entry["height"] = box_height
+        return
+
+    photo_entry["data"] = buf.getvalue()
+    photo_entry["mime_type"] = "image/png"
+    photo_entry["zip_path"] = f'BinData/{Path(str(photo_entry["zip_path"])).stem}.png'
+    photo_entry["pixel_size"] = (canvas_width, canvas_height)
+    photo_entry["width"] = box_width
+    photo_entry["height"] = box_height
+    photo_entry["org_width"] = box_width
+    photo_entry["org_height"] = box_height
+
+
+def _insert_activity_photo_into_xml(xml_text: str, photo_entry: dict[str, Any]) -> tuple[str, int, list[str]]:
+    warnings: list[str] = []
+    rows = _iter_rows(xml_text)
+    for idx, row in enumerate(rows):
+        if "활동 사진" not in row[2]:
+            continue
+        if idx + 1 >= len(rows):
+            break
+        target_start, _target_end, target_row = rows[idx + 1]
+        cells = _iter_cells(target_row)
+        if not cells:
+            break
+        cell_start, _cell_end, cell_xml = cells[0]
+        paras = _get_paragraphs_in_range(cell_xml, 0, len(cell_xml))
+        max_width, max_height = _activity_photo_fit_box(cell_xml)
+        picture_para = _make_activity_photo_paragraph(photo_entry, max_width=max_width, max_height=max_height)
+        if paras:
+            replace_start = target_start + cell_start + paras[0][0]
+            replace_end = target_start + cell_start + paras[-1][1]
+            new_xml = xml_text[:replace_start] + picture_para + xml_text[replace_end:]
+            return _ensure_hc_namespace(new_xml), 1, warnings
+
+        sublist_close = cell_xml.rfind("</hp:subList>")
+        if sublist_close != -1:
+            insert_at = target_start + cell_start + sublist_close
+            new_xml = xml_text[:insert_at] + picture_para + xml_text[insert_at:]
+            return _ensure_hc_namespace(new_xml), 1, warnings
+        break
+
+    return xml_text, 0, warnings
+
+
+def _activity_photo_fit_box(cell_xml: str) -> tuple[int, int]:
+    width = _ACTIVITY_PHOTO_MAX_WIDTH
+    height = _ACTIVITY_PHOTO_MAX_HEIGHT
+
+    cell_size = re.search(r'<hp:cellSz\b[^>]*\bwidth="(\d+)"[^>]*\bheight="(\d+)"', cell_xml)
+    if cell_size:
+        width = int(cell_size.group(1))
+        height = int(cell_size.group(2))
+
+    margins = re.search(
+        r'<hp:cellMargin\b[^>]*\bleft="(\d+)"[^>]*\bright="(\d+)"[^>]*\btop="(\d+)"[^>]*\bbottom="(\d+)"',
+        cell_xml,
+    )
+    if margins:
+        left, right, top, bottom = (int(margins.group(i)) for i in range(1, 5))
+        width = max(1000, width - left - right)
+        height = max(1000, height - top - bottom)
+
+    return min(width, _ACTIVITY_PHOTO_MAX_WIDTH), min(height, _ACTIVITY_PHOTO_MAX_HEIGHT)
+
+
+def _ensure_hc_namespace(xml_text: str) -> str:
+    if "xmlns:hc=" in xml_text:
+        return xml_text
+    return re.sub(
+        r'(<(?:\w+:)?sec\b)',
+        r'\1 xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core"',
+        xml_text,
+        count=1,
+    )
+
+
+def _make_activity_photo_paragraph(
+    photo_entry: dict[str, Any],
+    *,
+    max_width: int = _ACTIVITY_PHOTO_MAX_WIDTH,
+    max_height: int = _ACTIVITY_PHOTO_MAX_HEIGHT,
+) -> str:
+    width, height = _fit_activity_photo_size(photo_entry, max_width=max_width, max_height=max_height)
+    org_width, org_height = _activity_photo_original_size(photo_entry)
+    binary_id = xml_escape(str(photo_entry["id"]))
+
+    # Unique IDs: use deterministic hash so the same image always gets the same ID
+    _h = abs(hash(binary_id)) % (2**31 - 1)
+    pic_id = (_h ^ 0x7A3C9F01) % (2**31 - 1)
+    inst_id = (_h ^ 0x1B2E4D8C) % (2**31 - 1)
+    half_w = width // 2
+    half_h = height // 2
+
+    # hp:pic is placed DIRECTLY inside hp:run (no hp:ctrl wrapper).
+    # Element order matches what the HWP application generates:
+    #   offset, orgSz, curSz, flip, rotationInfo, renderingInfo,
+    #   imgRect, imgClip, inMargin, hc:img, effects, sz, pos, outMargin, shapeComment
+    return (
+        '<hp:p id="0" paraPrIDRef="19" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        '<hp:run charPrIDRef="0">'
+        f'<hp:pic id="{pic_id}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" '
+        f'textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" '
+        f'instid="{inst_id}" reverse="0">'
+        '<hp:offset x="0" y="0"/>'
+        f'<hp:orgSz width="{org_width}" height="{org_height}"/>'
+        f'<hp:curSz width="{width}" height="{height}"/>'
+        '<hp:flip horizontal="0" vertical="0"/>'
+        f'<hp:rotationInfo angle="0" centerX="{half_w}" centerY="{half_h}" rotateimage="1"/>'
+        '<hp:renderingInfo>'
+        '<hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+        '<hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+        '<hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+        '</hp:renderingInfo>'
+        '<hp:imgRect>'
+        f'<hc:pt0 x="0" y="0"/><hc:pt1 x="{width}" y="0"/>'
+        f'<hc:pt2 x="{width}" y="{height}"/><hc:pt3 x="0" y="{height}"/>'
+        '</hp:imgRect>'
+        f'<hp:imgClip left="0" right="{org_width}" top="0" bottom="{org_height}"/>'
+        '<hp:inMargin left="0" right="0" top="0" bottom="0"/>'
+        f'<hc:img binaryItemIDRef="{binary_id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/>'
+        '<hp:effects/>'
+        f'<hp:sz width="{width}" widthRelTo="ABSOLUTE" height="{height}" heightRelTo="ABSOLUTE" protect="0"/>'
+        '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" '
+        'holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" '
+        'vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+        '<hp:outMargin left="0" right="0" top="0" bottom="0"/>'
+        '<hp:shapeComment>그림입니다.</hp:shapeComment>'
+        '</hp:pic>'
+        '<hp:t/>'
+        '</hp:run>'
+        '<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" '
+        'baseline="850" spacing="600" horzpos="0" horzsize="40932" flags="393216"/></hp:linesegarray>'
+        '</hp:p>'
+    )
+
+
+def _activity_photo_original_size(photo_entry: dict[str, Any]) -> tuple[int, int]:
+    if photo_entry.get("org_width") and photo_entry.get("org_height"):
+        return int(photo_entry["org_width"]), int(photo_entry["org_height"])
+    pixel_size = photo_entry.get("pixel_size")
+    if isinstance(pixel_size, tuple) and len(pixel_size) == 2 and pixel_size[0] > 0 and pixel_size[1] > 0:
+        # HWP units are 1/7200 inch. Treat image pixels as 96 DPI to describe
+        # the full source rectangle; curSz/sz then scale this whole rectangle.
+        return int(pixel_size[0]) * 75, int(pixel_size[1]) * 75
+    return (
+        int(photo_entry.get("width") or _ACTIVITY_PHOTO_FALLBACK_WIDTH),
+        int(photo_entry.get("height") or _ACTIVITY_PHOTO_FALLBACK_HEIGHT),
+    )
+
+
+def _fit_activity_photo_size(
+    photo_entry: dict[str, Any],
+    *,
+    max_width: int,
+    max_height: int,
+) -> tuple[int, int]:
+    if photo_entry.get("org_width") and photo_entry.get("org_height"):
+        return int(photo_entry["org_width"]), int(photo_entry["org_height"])
+
+    pixel_size = photo_entry.get("pixel_size")
+    if isinstance(pixel_size, tuple) and len(pixel_size) == 2 and pixel_size[0] > 0 and pixel_size[1] > 0:
+        source_width, source_height = int(pixel_size[0]), int(pixel_size[1])
+    else:
+        source_width = int(photo_entry.get("width") or _ACTIVITY_PHOTO_FALLBACK_WIDTH)
+        source_height = int(photo_entry.get("height") or _ACTIVITY_PHOTO_FALLBACK_HEIGHT)
+
+    width = max_height * source_width // source_height
+    height = max_height
+    if width > max_width:
+        width = max_width
+        height = max_width * source_height // source_width
+
+    return max(1000, width), max(1000, height)
+
+
+def _read_image_pixel_size(path: Path) -> tuple[int, int] | None:
+    try:
+        with path.open("rb") as f:
+            header = f.read(32)
+            if header.startswith(b"\x89PNG\r\n\x1a\n") and header[12:16] == b"IHDR":
+                return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+            if header[:3] == b"\xff\xd8\xff":
+                f.seek(2)
+                return _read_jpeg_pixel_size(f)
+            if header[:6] in (b"GIF87a", b"GIF89a"):
+                return int.from_bytes(header[6:8], "little"), int.from_bytes(header[8:10], "little")
+            if header[:2] == b"BM":
+                return int.from_bytes(header[18:22], "little"), abs(int.from_bytes(header[22:26], "little", signed=True))
+    except Exception:
+        return None
+    return None
+
+
+def _read_jpeg_pixel_size(f: Any) -> tuple[int, int] | None:
+    while True:
+        marker_start = f.read(1)
+        if not marker_start:
+            return None
+        if marker_start != b"\xff":
+            continue
+        marker = f.read(1)
+        while marker == b"\xff":
+            marker = f.read(1)
+        if marker in {b"\xc0", b"\xc1", b"\xc2", b"\xc3", b"\xc5", b"\xc6", b"\xc7", b"\xc9", b"\xca", b"\xcb", b"\xcd", b"\xce", b"\xcf"}:
+            segment = f.read(7)
+            if len(segment) < 7:
+                return None
+            return int.from_bytes(segment[3:5], "big"), int.from_bytes(segment[5:7], "big")
+        if marker in {b"\xd8", b"\xd9"}:
+            continue
+        length_bytes = f.read(2)
+        if len(length_bytes) < 2:
+            return None
+        length = int.from_bytes(length_bytes, "big")
+        if length < 2:
+            return None
+        f.seek(length - 2, 1)
+
+
+def _append_hpf_image_items(raw: bytes, photo_entries: list[dict[str, Any]]) -> bytes:
+    text = raw.decode("utf-8", errors="replace")
+    if "</opf:manifest>" not in text:
+        return raw
+    insert = "".join(
+        f'<opf:item id="{xml_escape(entry["id"])}" href="{xml_escape(entry["zip_path"])}" '
+        f'media-type="{xml_escape(entry["mime_type"])}" isEmbeded="1"/>'
+        for entry in photo_entries
+        if entry["id"] not in text and entry["zip_path"] not in text
+    )
+    if not insert:
+        return raw
+    # Insert image items before section0 (matching HWP's own output order)
+    if 'id="section0"' in text:
+        return text.replace('<opf:item id="section0"', insert + '<opf:item id="section0"', 1).encode("utf-8")
+    return text.replace("</opf:manifest>", insert + "</opf:manifest>", 1).encode("utf-8")
+
+
+def _append_header_bindata_items(raw: bytes, photo_entries: list[dict[str, Any]]) -> bytes:
+    """Register embedded image binaries in Contents/header.xml.
+
+    The section XML references images by ``hc:img@binaryItemIDRef``. Hancom
+    clients also expect matching ``hh:binItem`` entries in header.xml, otherwise
+    the binary can exist in the zip but still render as missing.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    if "<hh:head" not in text:
+        return raw
+
+    existing_ids = set(re.findall(r'<hh:binItem\b[^>]*\bid="([^"]+)"', text))
+    items = [
+        (
+            f'<hh:binItem id="{xml_escape(entry["id"])}" '
+            f'type="Embedding" '
+            f'embedding="{xml_escape(entry["zip_path"])}" '
+            f'mediaType="{xml_escape(entry["mime_type"])}"/>'
+        )
+        for entry in photo_entries
+        if entry["id"] not in existing_ids
+    ]
+    if not items:
+        return raw
+
+    if "<hh:binData" in text:
+        new_text = text.replace("</hh:binData>", "".join(items) + "</hh:binData>", 1)
+        return _refresh_bindata_item_count(new_text).encode("utf-8")
+
+    insert = f'<hh:binData itemCnt="{len(items)}">{"".join(items)}</hh:binData>'
+    if "<hh:refList>" in text:
+        return text.replace("<hh:refList>", "<hh:refList>" + insert, 1).encode("utf-8")
+    return text.replace(">", ">" + insert, 1).encode("utf-8")
+
+
+def _refresh_bindata_item_count(text: str) -> str:
+    match = re.search(r'(<hh:binData\b[^>]*)(>)', text)
+    if not match:
+        return text
+    end = text.find("</hh:binData>", match.end())
+    if end == -1:
+        return text
+    count = len(re.findall(r"<hh:binItem\b", text[match.end():end]))
+    open_tag = match.group(1)
+    if re.search(r'\bitemCnt="[^"]*"', open_tag):
+        open_tag = re.sub(r'\bitemCnt="[^"]*"', f'itemCnt="{count}"', open_tag, count=1)
+    else:
+        open_tag += f' itemCnt="{count}"'
+    return text[:match.start()] + open_tag + match.group(2) + text[match.end():]
+
 
 
 _TEMPLATE_EXAMPLE_PATTERNS = re.compile(

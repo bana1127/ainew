@@ -1,34 +1,49 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Bot, X } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { AssistantChatPanel } from "@/components/assistant/AssistantChatPanel";
 import type { AssistantChatContext } from "@/lib/api";
 
-function buildContext(pathname: string | null): AssistantChatContext {
+function buildContext(pathname: string | null, tab: string | null): AssistantChatContext {
   const path = pathname || "/";
   const activityMatch = path.match(/^\/activities\/([^/?#]+)/);
   if (activityMatch?.[1]) {
+    const activityId = decodeURIComponent(activityMatch[1]);
     return {
       page: "activity_detail",
-      activity_id: decodeURIComponent(activityMatch[1]),
+      current_page: "activity_detail",
+      activity_id: activityId,
+      current_activity_id: activityId,
+      current_tab: tab,
     };
   }
-  if (path.startsWith("/budget")) return { page: "budget" };
-  if (path.startsWith("/payments")) return { page: "payments" };
-  if (path.startsWith("/transactions")) return { page: "transactions" };
-  if (path.startsWith("/receipts")) return { page: "receipts" };
-  if (path.startsWith("/members")) return { page: "members" };
-  if (path.startsWith("/activities")) return { page: "activities" };
-  if (path.startsWith("/assistant")) return { page: "assistant" };
-  return { page: "global" };
+  if (path.startsWith("/budget")) return { page: "budget", current_page: "budget", current_tab: tab };
+  if (path.startsWith("/payments")) return { page: "payments", current_page: "payments", current_tab: tab };
+  if (path.startsWith("/transactions")) return { page: "transactions", current_page: "transactions", current_tab: tab };
+  if (path.startsWith("/receipts")) return { page: "receipts", current_page: "receipts", current_tab: tab };
+  if (path.startsWith("/members")) return { page: "members", current_page: "members", current_tab: tab };
+  if (path.startsWith("/activities")) return { page: "activities", current_page: "activities", current_tab: tab };
+  if (path.startsWith("/assistant")) return { page: "assistant", current_page: "assistant", current_tab: tab };
+  return { page: "global", current_page: "global", current_tab: tab };
 }
 
 export function FloatingAssistant() {
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<string | null>(null);
   const pathname = usePathname();
-  const context = useMemo(() => buildContext(pathname), [pathname]);
+
+  useEffect(() => {
+    const updateTab = () => {
+      setTab(new URLSearchParams(window.location.search).get("tab"));
+    };
+    updateTab();
+    window.addEventListener("popstate", updateTab);
+    return () => window.removeEventListener("popstate", updateTab);
+  }, [pathname]);
+
+  const context = useMemo(() => buildContext(pathname, tab), [pathname, tab]);
 
   return (
     <>

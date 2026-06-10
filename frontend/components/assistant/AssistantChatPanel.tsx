@@ -14,6 +14,16 @@ type ChatMessage = {
   role: "user" | "assistant";
   text: string;
   links?: AssistantChatLink[];
+  summary?: Array<{ label: string; value: string }>;
+  items?: Array<{
+    title?: string | null;
+    subtitle?: string | null;
+    status?: string | null;
+    url?: string | null;
+    meta?: Record<string, string | number | null | undefined>;
+  }>;
+  zeroReasons?: string[];
+  scope?: string | null;
 };
 
 type AssistantChatPanelProps = {
@@ -72,6 +82,7 @@ export function AssistantChatPanel({ context, onClose }: AssistantChatPanelProps
         context: {
           ...context,
           last_activity_id: lastActivityId ?? context.activity_id ?? null,
+          current_activity_id: context.current_activity_id ?? context.activity_id ?? lastActivityId ?? null,
         },
       });
       const activityLink = response.links.find((link) => link.url.match(/^\/activities\/([^/?#]+)/));
@@ -84,6 +95,10 @@ export function AssistantChatPanel({ context, onClose }: AssistantChatPanelProps
           role: "assistant",
           text: response.answer,
           links: response.links,
+          summary: response.summary,
+          items: response.items,
+          zeroReasons: response.zero_reasons,
+          scope: response.scope,
         },
       ]);
     } catch (error) {
@@ -152,6 +167,83 @@ export function AssistantChatPanel({ context, onClose }: AssistantChatPanelProps
               }}
             >
               <p className="whitespace-pre-wrap break-words">{message.text}</p>
+              {message.scope && (
+                <p
+                  className="mt-2 rounded-lg px-2 py-1 text-[11px] leading-4"
+                  style={{ background: "var(--surface-soft)", color: "var(--text-muted)" }}
+                >
+                  기준: {message.scope}
+                </p>
+              )}
+              {message.summary && message.summary.length > 0 && (
+                <div className="mt-2 grid grid-cols-2 gap-1.5">
+                  {message.summary.slice(0, 4).map((item) => (
+                    <div
+                      key={`${message.id}-${item.label}`}
+                      className="rounded-lg px-2 py-1.5"
+                      style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}
+                    >
+                      <p className="text-[10px] leading-3" style={{ color: "var(--text-muted)" }}>{item.label}</p>
+                      <p className="text-xs font-semibold" style={{ color: "var(--text-main)" }}>{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {message.items && message.items.length > 0 && (
+                <div className="mt-2 space-y-1.5">
+                  {message.items.slice(0, 5).map((item, index) => {
+                    const body = (
+                      <div
+                        className="rounded-lg px-2 py-1.5 transition hover:bg-primary-soft"
+                        style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="min-w-0 flex-1 truncate text-xs font-semibold" style={{ color: "var(--text-main)" }}>
+                            {index + 1}. {item.title ?? "항목"}
+                          </p>
+                          {item.status && (
+                            <span className="shrink-0 text-[10px]" style={{ color: "var(--text-muted)" }}>
+                              {item.status}
+                            </span>
+                          )}
+                        </div>
+                        {item.subtitle && (
+                          <p className="mt-0.5 truncate text-[11px]" style={{ color: "var(--text-muted)" }}>{item.subtitle}</p>
+                        )}
+                        {item.meta && Object.keys(item.meta).length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
+                            {Object.entries(item.meta).slice(0, 4).map(([key, value]) => (
+                              <span key={key} className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                                {key} {String(value ?? "-")}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                    return item.url ? (
+                      <a key={`${message.id}-item-${index}`} href={item.url} className="block">
+                        {body}
+                      </a>
+                    ) : (
+                      <div key={`${message.id}-item-${index}`}>{body}</div>
+                    );
+                  })}
+                </div>
+              )}
+              {message.zeroReasons && message.zeroReasons.length > 0 && (
+                <div
+                  className="mt-2 space-y-1 rounded-lg px-2 py-1.5"
+                  style={{ background: "var(--surface-soft)", border: "1px solid var(--border-soft)" }}
+                >
+                  <p className="text-[11px] font-semibold" style={{ color: "var(--text-main)" }}>가능한 이유</p>
+                  {message.zeroReasons.slice(0, 4).map((reason) => (
+                    <p key={reason} className="text-[11px] leading-4" style={{ color: "var(--text-muted)" }}>
+                      {reason}
+                    </p>
+                  ))}
+                </div>
+              )}
               {message.links && message.links.length > 0 && (
                 <div className="mt-2 flex flex-col gap-1.5">
                   {message.links.map((link) => (

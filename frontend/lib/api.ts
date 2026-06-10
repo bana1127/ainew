@@ -75,6 +75,7 @@ export type DashboardTodo = {
   unpaid_activity_fee: number;
   no_report_activities: number;
   no_evidence_activities: number;
+  no_activity_photo_activities: number;
   no_hwpx_activities: number;
 };
 
@@ -183,6 +184,151 @@ export async function getTransactions(): Promise<ApiRecord[]> {
 
 export async function getNotifications(): Promise<ApiRecord[]> {
   return apiFetch<ApiRecord[]>("/api/notifications");
+}
+
+export type N8nStatus = {
+  enabled: boolean;
+  webhook_configured: boolean;
+  secret_configured: boolean;
+  last_test_status: string | null;
+  last_test_at: string | null;
+};
+
+export type N8nTestPayload = {
+  recipient_email: string;
+  recipient_name?: string | null;
+  subject?: string;
+  body?: string;
+  target_url?: string | null;
+};
+
+export type NotificationRule = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  reminder_type: string;
+  target_scope: string;
+  channel: string;
+  send_time: string | null;
+  days_before: number | null;
+  days_after: number | null;
+  repeat_interval_days: number | null;
+  max_send_count: number | null;
+  require_confirm_before_send: boolean;
+  term: string | null;
+  quarter: string | null;
+  activity_id: string | null;
+  conditions: Record<string, unknown> | null;
+  template_subject: string;
+  template_body: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+};
+
+export type NotificationRulePayload = Omit<
+  NotificationRule,
+  "id" | "created_at" | "updated_at" | "deleted_at"
+>;
+
+export type NotificationPreviewItem = {
+  rule_id?: string | null;
+  reminder_type?: string | null;
+  target_type: string;
+  target_id: string;
+  recipient_email: string;
+  recipient_name: string | null;
+  subject: string;
+  body: string;
+  target_url: string | null;
+  reason: string;
+};
+
+export type NotificationPreviewResponse = {
+  rule_id: string;
+  count: number;
+  items: NotificationPreviewItem[];
+};
+
+export type NotificationDeliveryLog = {
+  id: string;
+  rule_id: string | null;
+  reminder_type: string;
+  target_type: string;
+  target_id: string;
+  recipient_email: string;
+  recipient_name: string | null;
+  subject: string;
+  body: string;
+  target_url: string | null;
+  provider: string;
+  provider_message_id: string | null;
+  status: string;
+  error_message: string | null;
+  sent_at: string | null;
+  created_at: string;
+};
+
+export type NotificationSendResult = {
+  requested: number;
+  sent: number;
+  failed: number;
+  skipped: number;
+  logs: NotificationDeliveryLog[];
+};
+
+export async function getN8nStatus(): Promise<N8nStatus> {
+  return apiFetch<N8nStatus>("/api/integrations/n8n/status");
+}
+
+export async function sendN8nTest(payload: N8nTestPayload): Promise<{ ok: boolean; status: string; detail: string | null }> {
+  return apiFetch("/api/integrations/n8n/test", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getNotificationRules(): Promise<NotificationRule[]> {
+  return apiFetch<NotificationRule[]>("/api/notifications/rules");
+}
+
+export async function createNotificationRule(payload: NotificationRulePayload): Promise<NotificationRule> {
+  return apiFetch<NotificationRule>("/api/notifications/rules", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateNotificationRule(
+  id: string,
+  payload: Partial<NotificationRulePayload>,
+): Promise<NotificationRule> {
+  return apiFetch<NotificationRule>(`/api/notifications/rules/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteNotificationRule(id: string): Promise<NotificationRule> {
+  return apiFetch<NotificationRule>(`/api/notifications/rules/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export async function previewNotificationRule(id: string): Promise<NotificationPreviewResponse> {
+  return apiFetch<NotificationPreviewResponse>(`/api/notifications/rules/${id}/preview`, {
+    method: "POST",
+  });
+}
+
+export async function sendNotificationRuleNow(id: string): Promise<NotificationSendResult> {
+  return apiFetch<NotificationSendResult>(`/api/notifications/rules/${id}/send-now`, {
+    method: "POST",
+  });
+}
+
+export async function getNotificationDeliveryLogs(): Promise<NotificationDeliveryLog[]> {
+  return apiFetch<NotificationDeliveryLog[]>("/api/notifications/logs");
 }
 
 export async function getSettings(): Promise<ApiRecord[]> {
@@ -764,7 +910,7 @@ export type BudgetReviewItem = {
   type: string;
   label: string;
   title: string | null;
-  amount: number;
+  amount: number | null;
   status: string | null;
   target_url: string;
   severity: "danger" | "warning" | "info" | string;
@@ -1411,7 +1557,7 @@ export async function generateActivityReportDraft(
 export type ReceiptExtractedData = {
   receipt_date: string | null;
   store_name: string | null;
-  amount: number;
+  amount: number | null;
   payment_method: string;
   category: string | null;
   raw_text: string | null;
@@ -1444,7 +1590,7 @@ export type Receipt = {
   transaction_id: string | null;
   receipt_date: string | null;
   store_name: string | null;
-  amount: number;
+  amount: number | null;
   payment_method: string | null;
   category: string | null;
   evidence_status: string;
@@ -1476,7 +1622,7 @@ export type ReceiptUpdate = {
   need_check?: boolean;
   reason?: string;
   store_name?: string;
-  amount?: number;
+  amount?: number | null;
   payment_method?: string;
   category?: string;
   receipt_date?: string | null;
@@ -1537,7 +1683,7 @@ export type ActivityEvidence = {
   title: string | null;
   receipt_date: string | null;
   store_name: string | null;
-  amount: number;
+  amount: number | null;
   payment_method: string | null;
   category: string | null;
   evidence_status: string;
@@ -1710,6 +1856,11 @@ export type AssistantChatContext = {
   activity_id?: string | null;
   last_activity_id?: string | null;
   period?: string | null;
+  current_page?: string | null;
+  current_activity_id?: string | null;
+  current_tab?: string | null;
+  visible_filters?: Record<string, unknown> | null;
+  quarter?: string | null;
 };
 
 export type AssistantChatLink = {
@@ -1719,34 +1870,21 @@ export type AssistantChatLink = {
 
 export type AssistantChatResponse = {
   answer: string;
-  intent:
-    | "member_count"
-    | "activity_count"
-    | "activity_overview"
-    | "activity_detail_insight"
-    | "activity_participant_count"
-    | "membership_fee_status"
-    | "membership_fee_insight"
-    | "activity_fee_status"
-    | "activity_fee_insight"
-    | "calendar_schedule"
-    | "budget_summary"
-    | "budget_insight"
-    | "cashflow_summary"
-    | "activity_settlement_status"
-    | "transaction_review"
-    | "evidence_missing"
-    | "evidence_summary"
-    | "report_missing"
-    | "report_summary"
-    | "audit_readiness"
-    | "document_summary"
-    | "receipt_summary"
-    | "ambiguous_activity"
-    | "unknown";
+  intent: string;
   data_sources: string[];
   links: AssistantChatLink[];
   confidence: number;
+  summary?: Array<{ label: string; value: string }>;
+  items?: Array<{
+    title?: string | null;
+    subtitle?: string | null;
+    status?: string | null;
+    url?: string | null;
+    meta?: Record<string, string | number | null | undefined>;
+  }>;
+  zero_reasons?: string[];
+  scope?: string | null;
+  context_used?: Record<string, unknown>;
 };
 
 export async function getAssistantChatSuggestions(): Promise<string[]> {
@@ -1852,6 +1990,7 @@ export type ActivityReceiptInfo = {
   evidence_status: string;
   need_check: boolean;
   reason: string | null;
+  document_type?: string | null;
   file_id?: string | null;
 };
 
@@ -2498,6 +2637,7 @@ export type DocumentPreviewResult = {
   mapped_fields: Record<string, string>;
   missing_fields: string[];
   warnings: string[];
+  activity_photo_count?: number;
   content_preview: {
     title: string;
     body: string;
@@ -2510,6 +2650,7 @@ export type DocumentGeneratePayload = {
   overrides?: Record<string, string>;
   mark_as_submission?: boolean;
   submission_month?: string;
+  include_activity_photos?: boolean;
 };
 
 export type DocumentGenerateResult = {
@@ -2522,6 +2663,7 @@ export type DocumentGenerateResult = {
   mode?: string;
   replaced_count?: number;
   participant_count?: number;
+  activity_photo_count?: number;
   warnings?: string[];
 };
 

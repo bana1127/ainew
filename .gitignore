@@ -17,4 +17,6 @@ backend/uploads/*
 backend/app/uploads/*
 !backend/app/uploads/.gitkeep
 /data
-/img
+./img
+.tmp-edge-profile/
+.tmp-edge-profile-2/
